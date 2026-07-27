@@ -7,6 +7,12 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+### Linux stream modes / private runtime foundation
+- Add first-class `linux_stream_mode` and `linux_private_runtime` config (Private Stream, Host Virtual Display, Mirror Desktop, GPU-native preference, reserved Gamescope Stream).
+- Keep legacy `headless_mode` / `linux_use_cage_compositor` / `linux_prefer_gpu_native_capture` as a compatibility mapping; UI and client-settings write both.
+- Centralize mode resolve/apply/labels in `stream_display_policy`; expose `gamescope_stream` as unavailable until a Gamescope backend lands.
+- Introduce `stream_runtime` interface with a labwc adapter so process session start does not hard-code cage forever.
+
 ## v1.3.1 - 2026-07-12
 
 Security and pairing-state patch focused on current cryptography dependencies, durable client authorization, and clearer paired-device history.

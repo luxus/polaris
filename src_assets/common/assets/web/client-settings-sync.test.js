@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyStreamDisplayModeToConfig,
   labelForStreamDisplayMode,
   resolveClientSettingsSync,
   resolveStreamDisplayMode,
   resolveStreamDisplayRuntimeNotice,
+  streamDisplayModeAvailable,
   stripClientSettingsResponseOnly,
 } from './client-settings-sync'
 
@@ -25,6 +27,25 @@ describe('client settings sync helpers', () => {
       linux_use_cage_compositor: 'enabled',
       linux_prefer_gpu_native_capture: 'enabled',
     })).toBe('windowed_stream')
+  })
+
+  it('prefers explicit linux_stream_mode over legacy booleans', () => {
+    expect(resolveStreamDisplayMode({
+      linux_stream_mode: 'desktop_display',
+      headless_mode: 'enabled',
+      linux_use_cage_compositor: 'enabled',
+    })).toBe('desktop_display')
+  })
+
+  it('registers gamescope_stream as unavailable and maps labwc private runtime on apply', () => {
+    expect(streamDisplayModeAvailable('gamescope_stream')).toBe(false)
+    expect(labelForStreamDisplayMode('gamescope_stream')).toBe('Gamescope Stream')
+
+    const applied = applyStreamDisplayModeToConfig({}, 'headless_stream')
+    expect(applied.linux_stream_mode).toBe('headless_stream')
+    expect(applied.linux_private_runtime).toBe('labwc')
+    expect(applied.headless_mode).toBe('enabled')
+    expect(applied.linux_use_cage_compositor).toBe('enabled')
   })
 
   it('labels GPU-native as a Private Stream capture capability', () => {

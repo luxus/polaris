@@ -69,6 +69,7 @@
   #include "platform/linux/session_manager.h"
   #include "platform/linux/cage_display_router.h"
   #include "platform/linux/stream_display_policy.h"
+  #include "platform/linux/stream_runtime.h"
   #include "platform/linux/input/inputtino_gamepad_isolation.h"
   #include <dirent.h>
   #include <fcntl.h>
@@ -5145,8 +5146,19 @@ namespace proc {
       false,
     };
 
-    auto log_runtime_state = []() {
-      auto runtime_state = cage_display_router::runtime_state();
+    // Private stream compositor (labwc today). Gamescope will plug in via stream_runtime.
+    const auto private_runtime = use_cage_compositor_for_session ?
+      stream_runtime::acquire(stream_display_policy::private_runtime_e::LABWC) :
+      nullptr;
+    if (use_cage_compositor_for_session && !private_runtime) {
+      BOOST_LOG(error) << "session_manager: Private stream runtime is not available for the configured mode"sv;
+      return 503;
+    }
+
+    auto log_runtime_state = [&]() {
+      const auto runtime_state = private_runtime ?
+        private_runtime->runtime_state() :
+        cage_display_router::runtime_state();
       stream_stats::update_runtime_state(runtime_state);
       BOOST_LOG(info) << "session_runtime: backend="sv << runtime_state.backend_name
                       << " requested_headless="sv << runtime_state.requested_headless
@@ -5155,31 +5167,34 @@ namespace proc {
     };
 
     auto start_cage_session = [&](const std::string &startup_cmd, bool force_windowed, bool strict_configured_encoder = false, bool save_successful_cache = true) -> bool {
-      if (cage_display_router::is_running()) {
-        cage_display_router::stop();
+      if (!private_runtime) {
+        return false;
+      }
+      if (private_runtime->is_running()) {
+        private_runtime->stop();
       }
 
-      if (!cage_display_router::start(
-            render_width,
-            render_height,
-            cage_refresh_hz,
-            startup_cmd,
-            force_windowed,
-            allow_cage_mangohud,
-            _session_instance_id
-          )) {
+      stream_runtime::start_params_t start_params;
+      start_params.width = render_width;
+      start_params.height = render_height;
+      start_params.refresh_hz = cage_refresh_hz;
+      start_params.game_cmd = startup_cmd;
+      start_params.force_windowed = force_windowed;
+      start_params.allow_mangohud = allow_cage_mangohud;
+      start_params.session_instance_id = _session_instance_id;
+      if (!private_runtime->start(start_params)) {
         return false;
       }
 
       if (!reprobe_encoders_for_cage(strict_configured_encoder, save_successful_cache)) {
-        cage_display_router::stop();
+        private_runtime->stop();
         return false;
       }
 
       log_runtime_state();
-      const auto runtime_state = cage_display_router::runtime_state();
+      const auto runtime_state = private_runtime->runtime_state();
       if (!runtime_state.effective_headless) {
-        // KDE edit mode only matters when labwc is a visible nested window on the desktop.
+        // KDE edit mode only matters when the private compositor is a visible nested window.
         session_manager::start_edit_mode_watchdog();
       }
       return true;

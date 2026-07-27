@@ -7,7 +7,13 @@ import DisplayOutputSelector from './audiovideo/DisplayOutputSelector.vue'
 import DisplayDeviceOptions from "./audiovideo/DisplayDeviceOptions.vue";
 import VirtualDisplayStatus from "./audiovideo/VirtualDisplayStatus.vue";
 import Checkbox from "../../Checkbox.vue";
-import { resolveClientSettingsSync, resolveStreamDisplayRuntimeNotice } from '../../client-settings-sync'
+import {
+  applyStreamDisplayModeToConfig,
+  resolveClientSettingsSync,
+  resolveStreamDisplayMode,
+  resolveStreamDisplayRuntimeNotice,
+  streamDisplayModeAvailable,
+} from '../../client-settings-sync'
 import { buildResolutionPlanner } from '../../display-resolution-planner'
 
 const $t = inject('i18n').t;
@@ -44,13 +50,15 @@ const streamDisplayModes = [
     id: 'headless_stream',
     title: 'Private Stream',
     badge: 'Recommended',
-    copy: 'Recommended. Starts apps inside a private hidden compositor without taking over the physical desktop. Polaris still reports the live capture path honestly.',
+    available: true,
+    copy: 'Recommended. Starts apps inside a private labwc compositor without taking over the physical desktop. Polaris still reports the live capture path honestly.',
     note: 'Best handheld path. GPU-native appears in session health as the capture path when Polaris can keep frames on DMA-BUF/GPU; otherwise it reports SHM/system-memory fallback.',
   },
   {
     id: 'host_virtual_display',
     title: 'Host Virtual Display',
     badge: 'Compatibility',
+    available: true,
     copy: 'Compatibility mode. Creates a display the operating system can see. Your desktop may rearrange or remember it.',
     note: 'Use this when the hidden compositor path is not available or the desktop needs to own the virtual output.',
   },
@@ -58,6 +66,7 @@ const streamDisplayModes = [
     id: 'desktop_display',
     title: 'Mirror Desktop',
     badge: 'Advanced',
+    available: true,
     copy: 'Streams the visible KDE, GNOME, or wlroots desktop. Use only when you explicitly want the host monitor/session mirrored.',
     note: 'Advanced and not private: people near the PC may see the desktop or game window. Use for troubleshooting or already-running apps.',
   },
@@ -65,21 +74,21 @@ const streamDisplayModes = [
     id: 'windowed_stream',
     title: 'Private Stream (GPU-native)',
     badge: 'Advanced capture',
+    available: true,
     copy: 'Advanced Private Stream preference: request GPU-native capture and allow Polaris to use a windowed private compositor if hidden headless cannot stay GPU-resident.',
     note: 'Use when diagnostics say Private Stream fell back to SHM/system-memory. GPU-native appears in session health as the capture path, not as a separate user-facing play mode.',
   },
+  {
+    id: 'gamescope_stream',
+    title: 'Gamescope Stream',
+    badge: 'Coming soon',
+    available: false,
+    copy: 'Reserved mode for a private Gamescope session (portal capture + HDR path). Not available in this host build yet.',
+    note: 'Private Stream continues to use labwc. A future release will own Gamescope start/stop without external session scripts.',
+  },
 ]
 
-const streamDisplayMode = computed(() => {
-  const headless = config.value.headless_mode === 'enabled'
-  const cage = config.value.linux_use_cage_compositor === 'enabled'
-  const gpuNative = config.value.linux_prefer_gpu_native_capture === 'enabled'
-
-  if (headless && cage && gpuNative) return 'windowed_stream'
-  if (headless && cage) return 'headless_stream'
-  if (headless) return 'host_virtual_display'
-  return 'desktop_display'
-})
+const streamDisplayMode = computed(() => resolveStreamDisplayMode(config.value))
 
 const selectedStreamDisplayMode = computed(() => (
   streamDisplayModes.find((mode) => mode.id === streamDisplayMode.value) || streamDisplayModes[0]
@@ -231,27 +240,16 @@ function setAutoQuality(enabled) {
 }
 
 function setStreamDisplayMode(mode) {
-  switch (mode) {
-    case 'headless_stream':
-      setEnabledConfig('headless_mode', true)
-      setEnabledConfig('linux_use_cage_compositor', true)
-      setEnabledConfig('linux_prefer_gpu_native_capture', false)
-      break
-    case 'host_virtual_display':
-      setEnabledConfig('headless_mode', true)
-      setEnabledConfig('linux_use_cage_compositor', false)
-      setEnabledConfig('linux_prefer_gpu_native_capture', false)
-      break
-    case 'desktop_display':
-      setEnabledConfig('headless_mode', false)
-      setEnabledConfig('linux_use_cage_compositor', false)
-      setEnabledConfig('linux_prefer_gpu_native_capture', false)
-      break
-    case 'windowed_stream':
-      setEnabledConfig('headless_mode', true)
-      setEnabledConfig('linux_use_cage_compositor', true)
-      setEnabledConfig('linux_prefer_gpu_native_capture', true)
-      break
+  if (!streamDisplayModeAvailable(mode)) {
+    return
+  }
+  const next = applyStreamDisplayModeToConfig(config.value, mode)
+  config.value.headless_mode = next.headless_mode
+  config.value.linux_use_cage_compositor = next.linux_use_cage_compositor
+  config.value.linux_prefer_gpu_native_capture = next.linux_prefer_gpu_native_capture
+  config.value.linux_stream_mode = next.linux_stream_mode
+  if (next.linux_private_runtime) {
+    config.value.linux_private_runtime = next.linux_private_runtime
   }
 }
 
@@ -298,7 +296,13 @@ const validateFallbackMode = (event) => {
               :key="mode.id"
               type="button"
               class="focus-ring min-h-[112px] rounded-lg border p-4 text-left transition"
-              :class="streamDisplayMode === mode.id ? 'border-ice/60 bg-ice/10' : 'border-storm/40 bg-deep/40 hover:border-storm/70'"
+              :disabled="mode.available === false"
+              :class="[
+                streamDisplayMode === mode.id ? 'border-ice/60 bg-ice/10' : 'border-storm/40 bg-deep/40',
+                mode.available === false
+                  ? 'cursor-not-allowed opacity-60'
+                  : 'hover:border-storm/70',
+              ]"
               @click="setStreamDisplayMode(mode.id)"
             >
               <div class="flex items-start justify-between gap-3">
@@ -309,7 +313,9 @@ const validateFallbackMode = (event) => {
                     ? 'border-green-400/30 bg-green-400/10 text-green-300'
                     : mode.id === 'windowed_stream'
                       ? 'border-amber-300/40 bg-amber-300/10 text-amber-200'
-                      : 'border-storm/40 bg-storm/10 text-storm'"
+                      : mode.id === 'gamescope_stream'
+                        ? 'border-ice/30 bg-ice/10 text-ice'
+                        : 'border-storm/40 bg-storm/10 text-storm'"
                 >
                   {{ mode.badge }}
                 </span>

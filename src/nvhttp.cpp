@@ -524,7 +524,9 @@ namespace nvhttp {
 
     bool host_prefers_headless() {
 #ifdef __linux__
-      return stream_display_policy::resolve(stream_display_policy::input_t {}).mode == stream_display_policy::mode_e::HEADLESS;
+      const auto resolved = stream_display_policy::resolve(stream_display_policy::input_t {});
+      // Private Stream family (labwc headless or GPU-native preference), not host vdisplay alone.
+      return resolved.use_cage_runtime && resolved.requested_headless;
 #else
       return false;
 #endif
@@ -541,12 +543,18 @@ namespace nvhttp {
       std::string mode_reason;
 
       auto allowed_modes = nlohmann::json::array();
+#ifdef __linux__
+      for (const auto &mode : stream_display_policy::allowed_launch_modes(virtual_display_available, false)) {
+        allowed_modes.push_back(mode);
+      }
+#else
       allowed_modes.push_back("headless_stream");
       allowed_modes.push_back("desktop_display");
       allowed_modes.push_back("windowed_stream");
       if (virtual_display_available) {
         allowed_modes.push_back("host_virtual_display");
       }
+#endif
 
       const bool steam_big_picture = boost::iequals(boost::trim_copy(std::string {app_name}), "Steam Big Picture");
 
@@ -880,40 +888,37 @@ namespace nvhttp {
     }
 
     std::string configured_stream_display_mode_selection() {
-      const auto &linux_display = config::video.linux_display;
-      if (!linux_display.headless_mode) {
-        return "desktop_display";
-      }
-      if (!linux_display.use_cage_compositor) {
-        return "host_virtual_display";
-      }
-      if (linux_display.prefer_gpu_native_capture) {
-        return "windowed_stream";
-      }
-      return "headless_stream";
+#ifdef __linux__
+      return stream_display_policy::resolve(stream_display_policy::input_t {
+        host_virtual_display_available(),
+        false,
+        false,
+      }).selection;
+#else
+      return "desktop_display";
+#endif
     }
 
     std::string effective_stream_display_mode_selection(
       const stream_stats::stats_t &stats,
       bool session_uses_virtual_display
     ) {
-      if (!stats.streaming) {
-        return configured_stream_display_mode_selection();
-      }
-      const auto configured_mode = configured_stream_display_mode_selection();
-      if (stats.runtime_gpu_native_override_active) {
-        return "windowed_stream";
-      }
-      if (session_uses_virtual_display) {
-        return "host_virtual_display";
-      }
-      if (configured_mode == "windowed_stream" && stats.runtime_effective_headless) {
-        return "windowed_stream";
-      }
-      if (stats.runtime_effective_headless) {
-        return "headless_stream";
-      }
-      return "desktop_display";
+#ifdef __linux__
+      return stream_display_policy::resolve_effective(
+        stream_display_policy::input_t {
+          host_virtual_display_available(),
+          false,
+          stats.runtime_gpu_native_override_active,
+        },
+        stats.streaming,
+        session_uses_virtual_display,
+        stats.runtime_effective_headless
+      ).selection;
+#else
+      (void) stats;
+      (void) session_uses_virtual_display;
+      return configured_stream_display_mode_selection();
+#endif
     }
 
     std::string effective_stream_display_mode_selection(const stream_stats::stats_t &stats) {
@@ -921,6 +926,10 @@ namespace nvhttp {
     }
 
     std::string stream_display_mode_label_for_selection(const std::string &selection) {
+#ifdef __linux__
+      const auto label = stream_display_policy::label_for_selection(selection);
+      return label.empty() ? "Mirror Desktop" : label;
+#else
       if (selection == "headless_stream") {
         return "Private Stream";
       }
@@ -930,64 +939,68 @@ namespace nvhttp {
       if (selection == "windowed_stream") {
         return "Private Stream (GPU-native)";
       }
+      if (selection == "gamescope_stream") {
+        return "Gamescope Stream";
+      }
       return "Mirror Desktop";
+#endif
     }
 
     std::string stream_display_mode_reason_for_selection(const std::string &selection) {
-      if (selection == "headless_stream") {
-        return "Polaris streams from a private headless compositor; GPU-native appears in session health when capture stays on DMA-BUF/GPU.";
-      }
-      if (selection == "host_virtual_display") {
-        return host_virtual_display_available() ?
-          "Polaris will create or use a host virtual display for this stream." :
-          "Polaris requested a host virtual display, but no backend is currently available.";
-      }
-      if (selection == "windowed_stream") {
-        return "Polaris can force a windowed private compositor when hidden Private Stream capture cannot stay GPU-native.";
-      }
+#ifdef __linux__
+      return stream_display_policy::reason_for_selection(selection, host_virtual_display_available());
+#else
+      (void) selection;
       return "Polaris will mirror the current desktop session.";
+#endif
     }
 
     bool apply_stream_display_mode_selection(const std::string &selection,
                                              std::string &error) {
-      bool headless = false;
-      bool cage = false;
-      bool gpu_native = false;
-
-      if (selection == "headless_stream") {
-        headless = true;
-        cage = true;
-      } else if (selection == "host_virtual_display") {
-        headless = true;
-      } else if (selection == "desktop_display") {
-        // Defaults already describe Mirror Desktop.
-      } else if (selection == "windowed_stream") {
-        headless = true;
-        cage = true;
-        gpu_native = true;
-      } else {
-        error = "stream_display_mode must be headless_stream, desktop_display, host_virtual_display, or windowed_stream";
+#ifdef __linux__
+      if (!stream_display_policy::apply_selection(selection, error)) {
         return false;
       }
 
-      config::video.linux_display.headless_mode = headless;
-      config::video.linux_display.use_cage_compositor = cage;
-      config::video.linux_display.prefer_gpu_native_capture = gpu_native;
-
+      const auto &linux_display = config::video.linux_display;
       if (!persist_config_values({
-            {"headless_mode", bool_config_value(headless)},
-            {"linux_use_cage_compositor", bool_config_value(cage)},
-            {"linux_prefer_gpu_native_capture", bool_config_value(gpu_native)}
+            {"linux_stream_mode", linux_display.stream_mode},
+            {"linux_private_runtime", linux_display.private_runtime.empty() ? "labwc" : linux_display.private_runtime},
+            {"headless_mode", bool_config_value(linux_display.headless_mode)},
+            {"linux_use_cage_compositor", bool_config_value(linux_display.use_cage_compositor)},
+            {"linux_prefer_gpu_native_capture", bool_config_value(linux_display.prefer_gpu_native_capture)}
           })) {
         error = "failed to persist stream display mode";
         return false;
       }
 
       return true;
+#else
+      error = "stream display mode selection is only supported on Linux";
+      return false;
+#endif
     }
 
     nlohmann::json stream_display_mode_options_json() {
       nlohmann::json modes = nlohmann::json::array();
+#ifdef __linux__
+      for (const auto &option : stream_display_policy::mode_options(host_virtual_display_available())) {
+        bool available = option.available;
+        if (option.value == "host_virtual_display") {
+          available = available && host_virtual_display_available();
+        }
+        modes.push_back({
+          {"value", option.value},
+          {"label", option.label},
+          {"available", available},
+          {"unavailable_reason", available ? "" : (option.unavailable_reason.empty() ?
+            "Host virtual display is not available on this host." :
+            option.unavailable_reason)},
+          {"restart_required", true},
+          {"reason", option.reason},
+        });
+      }
+#else
       for (const auto &selection : {
              "headless_stream"s,
              "desktop_display"s,
@@ -998,10 +1011,12 @@ namespace nvhttp {
           {"value", selection},
           {"label", stream_display_mode_label_for_selection(selection)},
           {"available", selection != "host_virtual_display" || host_virtual_display_available()},
+          {"unavailable_reason", ""},
           {"restart_required", true},
           {"reason", stream_display_mode_reason_for_selection(selection)}
         });
       }
+#endif
       return modes;
     }
 

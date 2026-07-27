@@ -2755,6 +2755,28 @@ namespace confighttp {
     output_tree["platform"] = POLARIS_PLATFORM;
     output_tree["version"] = PROJECT_VERSION;
 
+#ifdef __linux__
+    const auto stream_display_mode_label = [](const std::string &selection) {
+      const auto label = stream_display_policy::label_for_selection(selection);
+      return label.empty() ? "Mirror Desktop"s : std::string {label};
+    };
+    const auto stats = stream_stats::get_current();
+    const auto configured_mode = stream_display_policy::resolve(stream_display_policy::input_t {
+      virtual_display::is_available(),
+      false,
+      false,
+    }).selection;
+    const auto effective_mode = stream_display_policy::resolve_effective(
+      stream_display_policy::input_t {
+        virtual_display::is_available(),
+        false,
+        stats.runtime_gpu_native_override_active,
+      },
+      stats.streaming,
+      proc::proc.session_uses_virtual_display(),
+      stats.runtime_effective_headless
+    ).selection;
+#else
     const auto stream_display_mode_label = [](const std::string &selection) {
       if (selection == "headless_stream") {
         return "Private Stream"s;
@@ -2765,37 +2787,15 @@ namespace confighttp {
       if (selection == "windowed_stream") {
         return "Private Stream (GPU-native)"s;
       }
+      if (selection == "gamescope_stream") {
+        return "Gamescope Stream"s;
+      }
       return "Mirror Desktop"s;
     };
-    const auto configured_stream_display_mode = []() {
-      const auto &linux_display = config::video.linux_display;
-      if (!linux_display.headless_mode) {
-        return "desktop_display"s;
-      }
-      if (!linux_display.use_cage_compositor) {
-        return "host_virtual_display"s;
-      }
-      if (linux_display.prefer_gpu_native_capture) {
-        return "windowed_stream"s;
-      }
-      return "headless_stream"s;
-    };
     const auto stats = stream_stats::get_current();
-    const auto configured_mode = configured_stream_display_mode();
-    auto effective_mode = configured_mode;
-    if (stats.streaming) {
-      if (stats.runtime_gpu_native_override_active) {
-        effective_mode = "windowed_stream";
-      } else if (proc::proc.session_uses_virtual_display()) {
-        effective_mode = "host_virtual_display";
-      } else if (configured_mode == "windowed_stream" && stats.runtime_effective_headless) {
-        effective_mode = "windowed_stream";
-      } else if (stats.runtime_effective_headless) {
-        effective_mode = "headless_stream";
-      } else {
-        effective_mode = "desktop_display";
-      }
-    }
+    const auto configured_mode = "desktop_display"s;
+    const auto effective_mode = configured_mode;
+#endif
     const bool client_settings_relaunch_required =
       stats.streaming && configured_mode != effective_mode;
     const auto host_header = request->header.find("host");
