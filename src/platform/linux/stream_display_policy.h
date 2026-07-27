@@ -62,6 +62,8 @@ namespace stream_display_policy {
     bool prefer_gpu_native_capture = false;
     bool should_defer_encoder_probe = false;
     bool should_probe_against_runtime = false;
+    /// Honest backend id for stats/UI: labwc | gamescope | portal | host | virtual_display | …
+    std::string backend_name;
   };
 
   struct mode_option_t {
@@ -70,6 +72,10 @@ namespace stream_display_policy {
     std::string reason;
     bool available = true;
     std::string unavailable_reason;
+    std::string group;  // private | host | advanced | experimental
+    std::string runtime;  // labwc | gamescope | ""
+    std::string capture;  // auto | portal | wlroots | kms | evdi
+    std::string topology;  // leave_alone | host_virtual | swap_primary
   };
 
   struct legacy_booleans_t {

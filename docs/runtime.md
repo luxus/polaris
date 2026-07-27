@@ -26,11 +26,14 @@ linux_use_cage_compositor = enabled
 | `host_virtual_display` | Host-side virtual output (EVDI / wlr / kscreen) |
 | `desktop_display` | Mirror the current desktop session |
 | `gamescope_stream` | Reserved for a future Gamescope private runtime (not available yet) |
+| `family_isolated` / `headless_evdi` / `headless_dongle` | Reserved slots for community Family Mode + EVDI/dongle headless display work |
 
 - `linux_stream_mode` is the source of truth when set; otherwise Polaris derives the mode from the legacy booleans.
 - `linux_private_runtime` selects the nested compositor for Private Stream modes (`labwc` now; `gamescope` reserved).
 - `linux_prefer_gpu_native_capture = enabled` asks Polaris to prefer DMA-BUF/GPU-resident capture on capable NVIDIA and AMD/Mesa stacks. If a compositor or driver cannot provide it, Polaris should report the real SHM/system-memory fallback instead of pretending the stream is GPU-native.
 - Capture (wlroots screencopy, portal, KMS) stays orthogonal to which private runtime owns the session.
+
+See [Stream paths (plugin contract)](stream-paths.md) for how to add a new mode (runtime × capture × topology) without more boolean soup.
 
 The private runtime is intentionally isolated. Steam, Wine, XWayland clients, and game launches should stay inside the stream compositor instead of bouncing back to the host desktop.
 

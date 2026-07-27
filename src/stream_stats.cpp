@@ -83,14 +83,22 @@ namespace stream_stats {
       }
     }
 
-    const char *stream_display_mode_label() {
+    stream_display_policy::resolved_t current_stream_policy() {
 #ifdef __linux__
-      static thread_local std::string label;
-      label = stream_display_policy::resolve(stream_display_policy::input_t {
+      return stream_display_policy::resolve(stream_display_policy::input_t {
         false,
         false,
         cage_display_router::runtime_state().gpu_native_override_active,
-      }).label;
+      });
+#else
+      return {};
+#endif
+    }
+
+    const char *stream_display_mode_label() {
+#ifdef __linux__
+      static thread_local std::string label;
+      label = current_stream_policy().label;
       return label.c_str();
 #else
       const auto &linux_display = config::video.linux_display;
@@ -124,11 +132,22 @@ namespace stream_stats {
     j["streaming"] = streaming;
     j["client_name"] = client_name;
     j["client_ip"] = client_ip;
-    j["runtime_backend"] = runtime_backend;
+#ifdef __linux__
+    {
+      const auto policy = current_stream_policy();
+      const auto backend = !runtime_backend.empty() ? runtime_backend : policy.backend_name;
+      j["runtime_backend"] = backend.empty() ? "none" : backend;
+      j["stream_path_id"] = policy.selection;
+      j["stream_display_mode"] = policy.label.empty() ? stream_display_mode_label() : policy.label;
+      j["stream_display_mode_id"] = policy.selection;
+    }
+#else
+    j["runtime_backend"] = runtime_backend.empty() ? "none" : runtime_backend;
+    j["stream_display_mode"] = stream_display_mode_label();
+#endif
     j["runtime_requested_headless"] = runtime_requested_headless;
     j["runtime_effective_headless"] = runtime_effective_headless;
     j["runtime_gpu_native_override_active"] = runtime_gpu_native_override_active;
-    j["stream_display_mode"] = stream_display_mode_label();
     j["capture_transport"] = platf::from_frame_transport(capture_transport);
     j["capture_residency"] = platf::from_frame_residency(capture_residency);
     j["capture_format"] = platf::from_frame_format(capture_format);
@@ -973,7 +992,9 @@ namespace stream_stats {
 
   void update_runtime_state(const platf::runtime_state_t &state) {
     std::lock_guard<std::mutex> lock(stats_mutex);
-    current_stats.runtime_backend = state.backend_name;
+    if (!state.backend_name.empty()) {
+      current_stats.runtime_backend = state.backend_name;
+    }
     current_stats.runtime_requested_headless = state.requested_headless;
     current_stats.runtime_effective_headless = state.effective_headless;
     current_stats.runtime_gpu_native_override_active = state.gpu_native_override_active;

@@ -5146,25 +5146,49 @@ namespace proc {
       false,
     };
 
-    // Private stream compositor (labwc today). Gamescope will plug in via stream_runtime.
+    // Stream path policy (labwc / portal / host / future gamescope). Private
+    // runtime is only acquired for labwc (and later gamescope) paths.
+    const auto path_policy = stream_display_policy::resolve_current(
+      encoder_requires_gpu_native_capture,
+      false
+    );
     const auto private_runtime = use_cage_compositor_for_session ?
-      stream_runtime::acquire(stream_display_policy::private_runtime_e::LABWC) :
+      stream_runtime::acquire(path_policy.private_runtime == stream_display_policy::private_runtime_e::GAMESCOPE ?
+        stream_display_policy::private_runtime_e::GAMESCOPE :
+        stream_display_policy::private_runtime_e::LABWC) :
       nullptr;
     if (use_cage_compositor_for_session && !private_runtime) {
-      BOOST_LOG(error) << "session_manager: Private stream runtime is not available for the configured mode"sv;
+      BOOST_LOG(error) << "session_manager: Private stream runtime is not available for path ["sv
+                       << path_policy.selection << "] backend=["sv << path_policy.backend_name << ']';
       return 503;
     }
 
     auto log_runtime_state = [&]() {
-      const auto runtime_state = private_runtime ?
-        private_runtime->runtime_state() :
-        cage_display_router::runtime_state();
+      platf::runtime_state_t runtime_state;
+      if (private_runtime) {
+        runtime_state = private_runtime->runtime_state();
+      }
+      else {
+        runtime_state.backend_name = path_policy.backend_name.empty() ? "host" : path_policy.backend_name;
+        runtime_state.path_id = path_policy.selection;
+        runtime_state.requested_headless = path_policy.requested_headless;
+        runtime_state.effective_headless = path_policy.effective_headless;
+        runtime_state.gpu_native_override_active = false;
+      }
+      if (runtime_state.path_id.empty()) {
+        runtime_state.path_id = path_policy.selection;
+      }
       stream_stats::update_runtime_state(runtime_state);
-      BOOST_LOG(info) << "session_runtime: backend="sv << runtime_state.backend_name
+      BOOST_LOG(info) << "session_runtime: path="sv << runtime_state.path_id
+                      << " backend="sv << runtime_state.backend_name
                       << " requested_headless="sv << runtime_state.requested_headless
                       << " effective_headless="sv << runtime_state.effective_headless
                       << " gpu_native_override_active="sv << runtime_state.gpu_native_override_active;
     };
+    // Always publish an honest backend for non-labwc (portal/gamescope/host) sessions.
+    if (!use_cage_compositor_for_session) {
+      log_runtime_state();
+    }
 
     auto start_cage_session = [&](const std::string &startup_cmd, bool force_windowed, bool strict_configured_encoder = false, bool save_successful_cache = true) -> bool {
       if (!private_runtime) {

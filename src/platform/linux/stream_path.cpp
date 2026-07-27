@@ -1,0 +1,402 @@
+/**
+ * @file src/platform/linux/stream_path.cpp
+ * @brief Stream path registry and host capability probes.
+ */
+
+#include "stream_path.h"
+
+#include "src/config.h"
+#include "virtual_display.h"
+
+#include <cctype>
+#include <cstdlib>
+#include <unistd.h>
+
+namespace stream_path {
+  namespace {
+
+    std::string to_lower_copy(std::string_view value) {
+      std::string out;
+      out.reserve(value.size());
+      for (unsigned char ch : value) {
+        out.push_back(static_cast<char>(std::tolower(ch)));
+      }
+      return out;
+    }
+
+    bool binary_on_path(const char *name) {
+      if (!name || !*name) {
+        return false;
+      }
+      // Lightweight PATH probe without pulling boost.process into every TU.
+      const char *path_env = std::getenv("PATH");
+      if (!path_env) {
+        return false;
+      }
+      std::string path {path_env};
+      std::size_t start = 0;
+      while (start <= path.size()) {
+        const auto end = path.find(':', start);
+        const auto dir = path.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!dir.empty()) {
+          const std::string candidate = dir + "/" + name;
+          if (access(candidate.c_str(), X_OK) == 0) {
+            return true;
+          }
+        }
+        if (end == std::string::npos) {
+          break;
+        }
+        start = end + 1;
+      }
+      return false;
+    }
+
+  }  // namespace
+
+  std::vector<descriptor_t> registry() {
+    // Keep IDs stable. Unavailable paths stay listed so Nova/UI can show "coming soon"
+    // and so community work (EVDI / Family Mode / gamescope) has a slot to fill.
+    return {
+      {
+        k_headless_stream,
+        "Private Stream",
+        "Recommended",
+        "Apps run in a private labwc compositor without taking over the physical desktop.",
+        runtime_kind_e::LABWC,
+        capture_kind_e::WLROOTS,
+        topology_kind_e::LEAVE_ALONE,
+        false,
+        true,
+        true,
+        {},
+        "private",
+      },
+      {
+        k_windowed_stream,
+        "Private Stream (GPU-native)",
+        "Advanced capture",
+        "Private labwc session that prefers GPU-native capture, even if the compositor must run windowed.",
+        runtime_kind_e::LABWC,
+        capture_kind_e::WLROOTS,
+        topology_kind_e::LEAVE_ALONE,
+        true,
+        true,
+        true,
+        {},
+        "private",
+      },
+      {
+        k_host_virtual_display,
+        "Host Virtual Display",
+        "Compatibility",
+        "Create or use a host-visible virtual output (EVDI / wlr / kscreen).",
+        runtime_kind_e::NONE,
+        capture_kind_e::AUTO,
+        topology_kind_e::HOST_VIRTUAL,
+        false,
+        true,
+        true,
+        {},
+        "host",
+      },
+      {
+        k_desktop_display,
+        "Mirror Desktop",
+        "Advanced",
+        "Stream the visible desktop session (or an external compositor such as gamescope via portal).",
+        runtime_kind_e::NONE,
+        capture_kind_e::PORTAL,
+        topology_kind_e::LEAVE_ALONE,
+        false,
+        false,
+        true,
+        {},
+        "host",
+      },
+      {
+        k_gamescope_stream,
+        "Gamescope Stream",
+        "Coming soon",
+        "Private Gamescope session with portal/PipeWire capture. Lifecycle ownership lands in a follow-up.",
+        runtime_kind_e::GAMESCOPE,
+        capture_kind_e::PORTAL,
+        topology_kind_e::LEAVE_ALONE,
+        false,
+        true,
+        false,
+        "Gamescope Stream is not available in this build; use Mirror Desktop with an external gamescope session, or Private Stream (labwc).",
+        "private",
+      },
+      {
+        k_family_isolated,
+        "Family Mode (isolated)",
+        "Reserved",
+        "Per-app isolated labwc session so the host desktop stays usable (community Family Mode / PR #226).",
+        runtime_kind_e::LABWC,
+        capture_kind_e::WLROOTS,
+        topology_kind_e::LEAVE_ALONE,
+        false,
+        false,  // typically windowed-nested under the host Wayland session
+        false,
+        "Family Mode is not wired in this build; reserved for the isolated-session integration.",
+        "experimental",
+      },
+      {
+        k_headless_evdi,
+        "Headless EVDI",
+        "Reserved",
+        "Promote the desktop onto an EVDI virtual output and capture it (community headless display / PR #226).",
+        runtime_kind_e::NONE,
+        capture_kind_e::EVDI,
+        topology_kind_e::SWAP_PRIMARY,
+        false,
+        true,
+        false,
+        "Headless EVDI path is not wired in this build; reserved for EVDI-as-primary integration.",
+        "experimental",
+      },
+      {
+        k_headless_dongle,
+        "Headless Dongle",
+        "Reserved",
+        "Swap the desktop onto a physical dummy-plug connector for headless KMS capture (PR #226).",
+        runtime_kind_e::NONE,
+        capture_kind_e::KMS,
+        topology_kind_e::SWAP_PRIMARY,
+        false,
+        true,
+        false,
+        "Headless dongle swap is not wired in this build; reserved for display-swap integration.",
+        "experimental",
+      },
+    };
+  }
+
+  const descriptor_t *find(std::string_view id) {
+    const auto key = to_lower_copy(id);
+    for (const auto &entry : registry()) {
+      if (key == entry.id) {
+        // Return pointer into a static copy so callers can keep it briefly.
+        static thread_local descriptor_t storage;
+        storage = entry;
+        return &storage;
+      }
+    }
+    return nullptr;
+  }
+
+  std::string_view runtime_kind_id(runtime_kind_e kind) {
+    switch (kind) {
+      case runtime_kind_e::LABWC:
+        return k_runtime_labwc;
+      case runtime_kind_e::GAMESCOPE:
+        return k_runtime_gamescope;
+      case runtime_kind_e::NONE:
+      default:
+        return {};
+    }
+  }
+
+  std::string_view capture_kind_id(capture_kind_e kind) {
+    switch (kind) {
+      case capture_kind_e::WLROOTS:
+        return "wlroots";
+      case capture_kind_e::PORTAL:
+        return "portal";
+      case capture_kind_e::KMS:
+        return "kms";
+      case capture_kind_e::EVDI:
+        return "evdi";
+      case capture_kind_e::AUTO:
+      default:
+        return "auto";
+    }
+  }
+
+  std::string_view topology_kind_id(topology_kind_e kind) {
+    switch (kind) {
+      case topology_kind_e::HOST_VIRTUAL:
+        return "host_virtual";
+      case topology_kind_e::SWAP_PRIMARY:
+        return "swap_primary";
+      case topology_kind_e::LEAVE_ALONE:
+      default:
+        return "leave_alone";
+    }
+  }
+
+  runtime_kind_e parse_runtime_kind(std::string_view value) {
+    const auto key = to_lower_copy(value);
+    if (key == k_runtime_labwc) {
+      return runtime_kind_e::LABWC;
+    }
+    if (key == k_runtime_gamescope) {
+      return runtime_kind_e::GAMESCOPE;
+    }
+    return runtime_kind_e::NONE;
+  }
+
+  capture_kind_e parse_capture_kind(std::string_view value) {
+    const auto key = to_lower_copy(value);
+    if (key == "portal") {
+      return capture_kind_e::PORTAL;
+    }
+    if (key == "kms" || key == "drm") {
+      return capture_kind_e::KMS;
+    }
+    if (key == "evdi") {
+      return capture_kind_e::EVDI;
+    }
+    if (key == "wlr" || key == "wlroots" || key == "wayland") {
+      return capture_kind_e::WLROOTS;
+    }
+    return capture_kind_e::AUTO;
+  }
+
+  host_capabilities_t probe_host_capabilities() {
+    host_capabilities_t caps;
+    caps.labwc_present = binary_on_path("labwc");
+    caps.gamescope_present = binary_on_path("gamescope");
+    caps.virtual_display_available = virtual_display::is_available();
+    // Portal availability is environment-dependent; configured capture is the honest hint.
+    caps.configured_capture = config::video.capture;
+    const auto capture = to_lower_copy(caps.configured_capture);
+    caps.portal_screencast_available = capture.empty() || capture == "portal" || capture.find("portal") != std::string::npos;
+    // EVDI module presence is left false until the EVDI path is integrated; #226 can fill this.
+    caps.evdi_available = false;
+    return caps;
+  }
+
+  std::string backend_name_for_path(const descriptor_t &path, const host_capabilities_t &caps) {
+    switch (path.runtime) {
+      case runtime_kind_e::LABWC:
+        return std::string {k_runtime_labwc};
+      case runtime_kind_e::GAMESCOPE:
+        return std::string {k_runtime_gamescope};
+      case runtime_kind_e::NONE:
+        break;
+    }
+
+    if (path.topology == topology_kind_e::HOST_VIRTUAL || path.id == k_host_virtual_display) {
+      return std::string {k_backend_virtual_display};
+    }
+
+    if (path.capture == capture_kind_e::PORTAL ||
+        path.capture == capture_kind_e::AUTO) {
+      const auto capture = to_lower_copy(caps.configured_capture);
+      if (capture == "portal" || capture.find("portal") != std::string::npos) {
+        // External gamescope + portal is still "portal" capture on the host path.
+        if (caps.gamescope_present && !config::video.linux_display.use_cage_compositor) {
+          // Prefer gamescope label when GAMESCOPE_WAYLAND_DISPLAY is set for attach stacks.
+          if (const char *gs = std::getenv("GAMESCOPE_WAYLAND_DISPLAY"); gs && *gs) {
+            return std::string {k_runtime_gamescope};
+          }
+        }
+        return std::string {k_backend_portal};
+      }
+      if (capture == "kms" || capture == "drm") {
+        return "kms";
+      }
+      if (!capture.empty()) {
+        return capture;
+      }
+    }
+
+    if (path.capture == capture_kind_e::KMS) {
+      return "kms";
+    }
+    if (path.capture == capture_kind_e::EVDI) {
+      return "evdi";
+    }
+
+    return std::string {k_backend_host};
+  }
+
+  resolved_t resolve_path(
+    const descriptor_t &path,
+    const host_capabilities_t &caps,
+    bool active_encoder_requires_gpu_native,
+    bool runtime_gpu_native_override_active
+  ) {
+    resolved_t out;
+    out.path = path;
+    out.selection = std::string {path.id};
+    out.label = std::string {path.label};
+    out.reason = std::string {path.reason};
+    out.runtime = path.runtime;
+    out.capture = path.capture;
+    out.topology = path.topology;
+    out.available = path.available;
+    out.unavailable_reason = std::string {path.unavailable_reason};
+    out.requested_headless = path.request_headless;
+    out.prefer_gpu_native_capture =
+      path.prefer_gpu_native ||
+      active_encoder_requires_gpu_native ||
+      runtime_gpu_native_override_active ||
+      config::video.linux_display.prefer_gpu_native_capture;
+    out.backend_name = backend_name_for_path(path, caps);
+
+    // Soft availability: labwc path without binary stays selectable but truthfully notes it.
+    if (path.runtime == runtime_kind_e::LABWC && path.available && !caps.labwc_present) {
+      out.reason = "Private Stream requires labwc on PATH.";
+    }
+    if (path.topology == topology_kind_e::HOST_VIRTUAL && !caps.virtual_display_available) {
+      out.reason = "Host virtual display was requested, but no backend is currently available.";
+    }
+
+    switch (path.runtime) {
+      case runtime_kind_e::LABWC:
+        out.use_private_runtime = path.available;
+        out.use_cage_runtime = path.available;
+        out.effective_headless = path.request_headless && !runtime_gpu_native_override_active;
+        out.should_defer_encoder_probe = path.available;
+        out.should_probe_against_runtime = path.available;
+        if (runtime_gpu_native_override_active) {
+          out.effective_headless = false;
+          out.label = "Private Stream (GPU-native)";
+          out.reason = "Polaris is running the private compositor windowed so capture can stay GPU-native.";
+        }
+        else if (out.prefer_gpu_native_capture && path.id == k_headless_stream) {
+          // Encoder/config promotes headless_stream toward GPU-native labeling.
+          out.selection = std::string {k_windowed_stream};
+          out.label = "Private Stream (GPU-native)";
+          out.reason =
+            "Polaris can force a windowed private compositor when hidden Private Stream capture cannot stay GPU-native.";
+        }
+        else if (!path.request_headless && path.id == k_windowed_stream) {
+          out.label = "Private Stream (windowed)";
+        }
+        break;
+      case runtime_kind_e::GAMESCOPE:
+        out.use_private_runtime = false;  // not owned until backend lands
+        out.use_cage_runtime = false;
+        out.effective_headless = path.request_headless;
+        break;
+      case runtime_kind_e::NONE:
+        out.use_private_runtime = false;
+        out.use_cage_runtime = false;
+        out.use_host_virtual_display = path.topology == topology_kind_e::HOST_VIRTUAL;
+        out.effective_headless = false;
+        out.requested_headless = path.topology == topology_kind_e::HOST_VIRTUAL ||
+                                 path.topology == topology_kind_e::SWAP_PRIMARY;
+        break;
+    }
+
+    return out;
+  }
+
+  std::vector<descriptor_t> options_for_host(const host_capabilities_t &caps) {
+    auto options = registry();
+    for (auto &opt : options) {
+      if (!opt.available) {
+        continue;
+      }
+      // Do not hard-disable labwc paths when the binary is missing — still show them
+      // so the user can install labwc; availability of *reserved* paths stays false.
+      (void) caps;
+    }
+    return options;
+  }
+
+}  // namespace stream_path

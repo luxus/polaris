@@ -361,6 +361,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_manager.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_display_router.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_display_router.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_path.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_path.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_display_policy.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_display_policy.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime.h"

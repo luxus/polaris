@@ -168,4 +168,38 @@ TEST(StreamDisplayPolicyTests, AllowedLaunchModesExcludeUnavailableByDefault) {
   EXPECT_NE(std::find(allowed.begin(), allowed.end(), "headless_stream"), allowed.end());
   EXPECT_NE(std::find(allowed.begin(), allowed.end(), "host_virtual_display"), allowed.end());
   EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "gamescope_stream"), allowed.end());
+  EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "family_isolated"), allowed.end());
+  EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "headless_evdi"), allowed.end());
+}
+
+TEST(StreamDisplayPolicyTests, ModeOptionsExposeRuntimeCaptureTopologyForPlugins) {
+  const auto options = stream_display_policy::mode_options(false);
+  const auto gamescope = std::find_if(options.begin(), options.end(), [](const auto &opt) {
+    return opt.value == "gamescope_stream";
+  });
+  ASSERT_NE(gamescope, options.end());
+  EXPECT_EQ(gamescope->runtime, "gamescope");
+  EXPECT_EQ(gamescope->capture, "portal");
+  EXPECT_FALSE(gamescope->available);
+
+  const auto headless = std::find_if(options.begin(), options.end(), [](const auto &opt) {
+    return opt.value == "headless_stream";
+  });
+  ASSERT_NE(headless, options.end());
+  EXPECT_EQ(headless->runtime, "labwc");
+  EXPECT_EQ(headless->capture, "wlroots");
+  EXPECT_TRUE(headless->available);
+}
+
+TEST(StreamDisplayPolicyTests, DesktopPathReportsHonestPortalOrHostBackend) {
+  LinuxDisplayPolicyGuard guard;
+  ASSERT_TRUE([&] {
+    std::string error;
+    return stream_display_policy::apply_selection("desktop_display", error);
+  }());
+
+  const auto resolved = stream_display_policy::resolve(stream_display_policy::input_t {});
+  EXPECT_EQ(resolved.selection, "desktop_display");
+  EXPECT_FALSE(resolved.backend_name.empty());
+  EXPECT_NE(resolved.backend_name, "labwc");
 }

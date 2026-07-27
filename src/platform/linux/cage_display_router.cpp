@@ -57,6 +57,7 @@ namespace cage_display_router {
     .effective_headless = false,
     .gpu_native_override_active = false,
     .backend_name = "labwc",
+    .path_id = "headless_stream",
   };
 
   // -----------------------------------------------------------------------

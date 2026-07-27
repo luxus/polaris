@@ -2833,11 +2833,24 @@ namespace confighttp {
       auto vd_backend = virtual_display::detect_backend();
       output_tree["vdisplayAvailable"] = (vd_backend != virtual_display::backend_e::NONE);
       output_tree["vdisplayBackend"] = virtual_display::backend_name(vd_backend);
+      const auto policy = stream_display_policy::resolve(stream_display_policy::input_t {
+        vd_backend != virtual_display::backend_e::NONE,
+        false,
+        cage_display_router::runtime_state().gpu_native_override_active,
+      });
       auto runtime_state = cage_display_router::runtime_state();
-      output_tree["runtime_backend"] = runtime_state.backend_name;
-      output_tree["runtime_requested_headless"] = runtime_state.requested_headless;
-      output_tree["runtime_effective_headless"] = runtime_state.effective_headless;
+      // Prefer live cage state when private labwc is running; otherwise policy backend
+      // (portal / gamescope / host) so the UI never shows "Unknown".
+      output_tree["runtime_backend"] = cage_display_router::is_running() && !runtime_state.backend_name.empty() ?
+        runtime_state.backend_name :
+        (policy.backend_name.empty() ? "none" : policy.backend_name);
+      output_tree["runtime_requested_headless"] = policy.requested_headless;
+      output_tree["runtime_effective_headless"] = cage_display_router::is_running() ?
+        runtime_state.effective_headless :
+        policy.effective_headless;
       output_tree["runtime_gpu_native_override_active"] = runtime_state.gpu_native_override_active;
+      output_tree["stream_path_id"] = policy.selection;
+      output_tree["stream_path_label"] = policy.label;
     }
 #endif
     auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));

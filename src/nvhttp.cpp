@@ -998,6 +998,10 @@ namespace nvhttp {
             option.unavailable_reason)},
           {"restart_required", true},
           {"reason", option.reason},
+          {"group", option.group},
+          {"runtime", option.runtime},
+          {"capture", option.capture},
+          {"topology", option.topology},
         });
       }
 #else
