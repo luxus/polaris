@@ -14,6 +14,8 @@ starts at `v1.0.0`.
 - Introduce `stream_runtime` interface with a labwc adapter so process session start does not hard-code cage forever.
 - Add `stream_path` registry (runtime × capture × topology) with reserved slots for gamescope ownership and community EVDI/Family Mode paths; honest `runtime_backend` for portal/host when labwc is idle.
 - Document the path plugin contract in `docs/stream-paths.md`.
+- Enable **Headless Dongle** path (`headless_dongle`): privacy/extended swap via kscreen-doctor (`display_topology`, `headless_swap_mode`).
+- Harden portal/PipeWire capture teardown (disconnect under loop lock) to avoid SEGV on service stop.
 
 ## v1.3.1 - 2026-07-12
 

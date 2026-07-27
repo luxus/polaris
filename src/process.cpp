@@ -70,6 +70,7 @@
   #include "platform/linux/cage_display_router.h"
   #include "platform/linux/stream_display_policy.h"
   #include "platform/linux/stream_runtime.h"
+  #include "platform/linux/display_topology.h"
   #include "platform/linux/input/inputtino_gamepad_isolation.h"
   #include <dirent.h>
   #include <fcntl.h>
@@ -3819,54 +3820,13 @@ namespace proc {
   }
 
   namespace linux_display {
-    /**
-     * @brief Enable the streaming display and set display priorities for a streaming session.
-     * Uses kscreen-doctor to enable the streaming output and set it as priority 1.
-     */
+    // Thin wrappers — topology lives in display_topology for path plugins.
     void enable_streaming_display() {
-      const auto &cfg = config::video.linux_display;
-      if (!cfg.auto_manage_displays || cfg.streaming_output.empty()) {
-        return;
-      }
-
-      // Enable streaming output but keep primary display as priority 1
-      // so KDE taskbar stays on the main display
-      std::string cmd = "kscreen-doctor output." + cfg.streaming_output + ".enable";
-      if (!cfg.primary_output.empty()) {
-        cmd += " output." + cfg.primary_output + ".priority.1";
-        cmd += " output." + cfg.streaming_output + ".priority.2";
-      }
-
-      BOOST_LOG(info) << "Linux display management: enabling streaming display ["sv << cmd << "]"sv;
-      int ret = std::system(cmd.c_str());
-      if (ret != 0) {
-        BOOST_LOG(error) << "Linux display management: enable command failed with code ["sv << ret << "]"sv;
-      }
-      // Wait for display to come online before capture starts
-      std::this_thread::sleep_for(std::chrono::seconds(2));
+      display_topology::prepare_for_stream();
     }
 
-    /**
-     * @brief Disable the streaming display and restore the primary display after a streaming session ends.
-     * Uses kscreen-doctor to restore priority and disable the streaming output.
-     */
     void disable_streaming_display() {
-      const auto &cfg = config::video.linux_display;
-      if (!cfg.auto_manage_displays || cfg.streaming_output.empty()) {
-        return;
-      }
-
-      std::string cmd = "kscreen-doctor";
-      if (!cfg.primary_output.empty()) {
-        cmd += " output." + cfg.primary_output + ".priority.1";
-      }
-      cmd += " output." + cfg.streaming_output + ".priority.2 output." + cfg.streaming_output + ".disable";
-
-      BOOST_LOG(info) << "Linux display management: disabling streaming display ["sv << cmd << "]"sv;
-      int ret = std::system(cmd.c_str());
-      if (ret != 0) {
-        BOOST_LOG(error) << "Linux display management: disable command failed with code ["sv << ret << "]"sv;
-      }
+      display_topology::restore_after_stream();
     }
   }  // namespace linux_display
 #endif

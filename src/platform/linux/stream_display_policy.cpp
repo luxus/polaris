@@ -41,8 +41,12 @@ namespace stream_display_policy {
       if (key == stream_path::k_family_isolated) {
         return mode_e::WINDOWED_STREAM;  // nested labwc under host
       }
-      if (key == stream_path::k_headless_evdi || key == stream_path::k_headless_dongle) {
+      if (key == stream_path::k_headless_evdi) {
         return mode_e::HOST_VIRTUAL_DISPLAY;
+      }
+      if (key == stream_path::k_headless_dongle) {
+        // Host desktop + topology swap (not a software virtual display create path).
+        return mode_e::DESKTOP;
       }
       return mode_e::DESKTOP;
     }
@@ -193,6 +197,7 @@ namespace stream_display_policy {
     else if (key == k_host_virtual_display ||
              key == stream_path::k_headless_evdi ||
              key == stream_path::k_headless_dongle) {
+      // Dongle/EVDI: host desktop path with topology swap — not private labwc.
       booleans.headless_mode = true;
       booleans.use_cage_compositor = false;
       booleans.prefer_gpu_native_capture = false;
@@ -334,8 +339,32 @@ namespace stream_display_policy {
       return false;
     }
 
-    const auto booleans = legacy_booleans_for_selection(key);
     auto &linux_display = config::video.linux_display;
+
+    // Dongle path needs outputs configured before we commit.
+    if (key == stream_path::k_headless_dongle) {
+      if (linux_display.streaming_output.empty() || linux_display.primary_output.empty()) {
+        error = "headless_dongle requires linux_streaming_output (dongle) and linux_primary_output (real panel) in config";
+        return false;
+      }
+      if (linux_display.streaming_output == linux_display.primary_output) {
+        error = "headless_dongle needs distinct streaming and primary outputs";
+        return false;
+      }
+      linux_display.auto_manage_displays = true;
+      if (linux_display.headless_swap_mode.empty()) {
+        linux_display.headless_swap_mode = "privacy";
+      }
+      // Prefer KMS capture of the dongle connector by name.
+      if (config::video.capture.empty() || config::video.capture == "portal") {
+        config::video.capture = "kms";
+      }
+      if (config::video.output_name.empty()) {
+        config::video.output_name = linux_display.streaming_output;
+      }
+    }
+
+    const auto booleans = legacy_booleans_for_selection(key);
     linux_display.stream_mode = key;
     linux_display.headless_mode = booleans.headless_mode;
     linux_display.use_cage_compositor = booleans.use_cage_compositor;
@@ -421,6 +450,14 @@ namespace stream_display_policy {
       }
       if (!path.available) {
         continue;
+      }
+      // Dongle only when outputs are configured (else clients would pick a broken path).
+      if (path.id == stream_path::k_headless_dongle) {
+        const auto &cfg = config::video.linux_display;
+        if (cfg.streaming_output.empty() || cfg.primary_output.empty() ||
+            cfg.streaming_output == cfg.primary_output) {
+          continue;
+        }
       }
       modes.emplace_back(path.id);
     }

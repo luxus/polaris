@@ -159,16 +159,16 @@ namespace stream_path {
       {
         k_headless_dongle,
         "Headless Dongle",
-        "Reserved",
-        "Swap the desktop onto a physical dummy-plug connector for headless KMS capture (PR #226).",
+        "Physical dummy",
+        "Swap the desktop onto a physical dummy-plug connector for KMS capture. Requires linux_streaming_output + linux_primary_output + auto_manage.",
         runtime_kind_e::NONE,
         capture_kind_e::KMS,
         topology_kind_e::SWAP_PRIMARY,
         false,
         true,
-        false,
-        "Headless dongle swap is not wired in this build; reserved for display-swap integration.",
-        "experimental",
+        true,
+        {},
+        "host",
       },
     };
   }

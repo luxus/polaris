@@ -43,8 +43,8 @@ export function resolveStreamDisplayMode(config = {}) {
 }
 
 export function streamDisplayModeAvailable(mode) {
-  // Gamescope Stream is registered for API/UI but not implemented on this host build yet.
-  if (mode === 'gamescope_stream') return false
+  // Gamescope ownership + Family/EVDI software paths still reserved.
+  if (mode === 'gamescope_stream' || mode === 'family_isolated' || mode === 'headless_evdi') return false
   return true
 }
 
@@ -76,6 +76,13 @@ export function applyStreamDisplayModeToConfig(config = {}, mode) {
       next.linux_use_cage_compositor = 'disabled'
       next.linux_prefer_gpu_native_capture = 'disabled'
       next.linux_private_runtime = 'gamescope'
+      break
+    case 'headless_dongle':
+      next.headless_mode = 'enabled'
+      next.linux_use_cage_compositor = 'disabled'
+      next.linux_prefer_gpu_native_capture = 'disabled'
+      next.linux_auto_manage_displays = 'enabled'
+      next.headless_swap_mode = 'privacy'
       break
     case 'desktop_display':
     default:

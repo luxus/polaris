@@ -106,11 +106,11 @@ const streamDisplayModes = [
   {
     id: 'headless_dongle',
     title: 'Headless Dongle',
-    badge: 'Reserved',
-    available: false,
-    group: 'experimental',
-    copy: 'Swap desktop onto a dummy-plug connector for KMS capture (PR #226).',
-    note: 'Runtime: none · Capture: KMS · Topology: swap primary',
+    badge: 'Physical dummy',
+    available: true,
+    group: 'host',
+    copy: 'Swap the desktop onto a physical dummy-plug (HDMI/DP dongle), blank the real panel (privacy), capture via KMS.',
+    note: 'Requires linux_streaming_output (dongle) + linux_primary_output (panel) + auto_manage. Save after setting outputs.',
   },
   {
     id: 'desktop_display',

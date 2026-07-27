@@ -21,7 +21,7 @@ Config key: `linux_stream_mode = <path id>`. Legacy booleans (`headless_mode`, `
 | `gamescope_stream` | gamescope | portal | leave_alone | **Reserved** — runtime ownership TBD |
 | `family_isolated` | labwc | wlroots | leave_alone | **Reserved** — Family Mode / isolated per-app (PR #226) |
 | `headless_evdi` | none | evdi | swap_primary | **Reserved** — EVDI-as-primary (PR #226) |
-| `headless_dongle` | none | kms | swap_primary | **Reserved** — dummy-plug swap (PR #226) |
+| `headless_dongle` | none | kms | swap_primary | **Available** when `linux_streaming_output` + `linux_primary_output` + auto_manage are set (privacy swap via kscreen-doctor) |
 
 Source of truth: `src/platform/linux/stream_path.{h,cpp}` registry.
 

@@ -963,13 +963,30 @@ namespace nvhttp {
       }
 
       const auto &linux_display = config::video.linux_display;
-      if (!persist_config_values({
-            {"linux_stream_mode", linux_display.stream_mode},
-            {"linux_private_runtime", linux_display.private_runtime.empty() ? "labwc" : linux_display.private_runtime},
-            {"headless_mode", bool_config_value(linux_display.headless_mode)},
-            {"linux_use_cage_compositor", bool_config_value(linux_display.use_cage_compositor)},
-            {"linux_prefer_gpu_native_capture", bool_config_value(linux_display.prefer_gpu_native_capture)}
-          })) {
+      std::vector<std::pair<std::string, std::string>> values {
+        {"linux_stream_mode", linux_display.stream_mode},
+        {"linux_private_runtime", linux_display.private_runtime.empty() ? "labwc" : linux_display.private_runtime},
+        {"headless_mode", bool_config_value(linux_display.headless_mode)},
+        {"linux_use_cage_compositor", bool_config_value(linux_display.use_cage_compositor)},
+        {"linux_prefer_gpu_native_capture", bool_config_value(linux_display.prefer_gpu_native_capture)},
+      };
+      if (selection == "headless_dongle") {
+        values.emplace_back("linux_auto_manage_displays", bool_config_value(linux_display.auto_manage_displays));
+        values.emplace_back("headless_swap_mode", linux_display.headless_swap_mode.empty() ? "privacy" : linux_display.headless_swap_mode);
+        if (!linux_display.streaming_output.empty()) {
+          values.emplace_back("linux_streaming_output", linux_display.streaming_output);
+        }
+        if (!linux_display.primary_output.empty()) {
+          values.emplace_back("linux_primary_output", linux_display.primary_output);
+        }
+        if (!config::video.capture.empty()) {
+          values.emplace_back("capture", config::video.capture);
+        }
+        if (!config::video.output_name.empty()) {
+          values.emplace_back("output_name", config::video.output_name);
+        }
+      }
+      if (!persist_config_values(values)) {
         error = "failed to persist stream display mode";
         return false;
       }

@@ -596,6 +596,7 @@ namespace config {
       false,  // linux_display.capture_profile
       {},     // linux_display.stream_mode (empty = derive from legacy booleans)
       "labwc",  // linux_display.private_runtime
+      "privacy",  // linux_display.headless_swap_mode
     },  // linux_display
 
     "1920x1080x60",  // fallback_mode
@@ -1347,6 +1348,17 @@ namespace config {
     bool_f(vars, "linux_capture_profile", video.linux_display.capture_profile);
     string_f(vars, "linux_stream_mode", video.linux_display.stream_mode);
     string_f(vars, "linux_private_runtime", video.linux_display.private_runtime);
+    string_f(vars, "headless_swap_mode", video.linux_display.headless_swap_mode);
+    // Legacy boolean → headless_swap_mode when the new key is absent.
+    {
+      const bool has_swap_mode = vars.count("headless_swap_mode") > 0;
+      bool legacy_swap_primary = false;
+      const bool has_legacy = vars.count("headless_swap_primary") > 0;
+      bool_f(vars, "headless_swap_primary", legacy_swap_primary);
+      if (has_legacy && !has_swap_mode) {
+        video.linux_display.headless_swap_mode = legacy_swap_primary ? "privacy" : "off";
+      }
+    }
 
     string_f(vars, "fallback_mode", video.fallback_mode);
     bool_f(vars, "isolated_virtual_display_option", video.isolated_virtual_display_option);

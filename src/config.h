@@ -174,6 +174,11 @@ namespace config {
        * "labwc" (default) or "gamescope" (reserved; not available yet).
        */
       std::string private_runtime;
+      /**
+       * @brief When auto-managing a dongle/EVDI streaming output: "privacy" makes it
+       * primary and disables primary_output; "off" keeps physical primary (extended).
+       */
+      std::string headless_swap_mode;
     } linux_display;
 
     std::string fallback_mode;
