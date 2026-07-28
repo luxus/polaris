@@ -24,6 +24,7 @@ starts at `v1.0.0`.
 - Solid-base stop path: Moonlight `/cancel` responds before nested teardown; owner cancel ignores stale sessiontoken (case-insensitive UUID); portal PipeWire disconnect under loop lock; gamescope path launches stock steam-appid detached via runtime wrap (mode-agnostic imports).
 - Portal restore token: keep enabled; on SelectSources failure invalidate the saved token and retry once without it, then save a fresh token. Wait briefly for `AvailableCursorModes` ≠ 0 before omitting cursor. Release portal/PipeWire capture before nested compositor kill (SB-2 SEGV).
 - SB-2 ordered stream stop (issue #2): Browser Stream joins video/audio capture and releases portal/PipeWire **before** pidfd-killing gamescope/labwc; `terminate_impl` and WebUI disconnect share the same prepare path so polaris no longer SEGV in `pipewire_capture::on_param_changed` when the client ends the stream.
+- SB-5 mode-neutral Steam apps (issue #5): migration v9 + load-time normalize unwrap `polaris-hdr-session` hardwires to `steam-appid` + detached `rungameid`; gamescope path applies attach X11 env (no host Wayland) via `stream_runtime::wrap_cmd` / process. Optional Steam Big Picture may keep nested WSI shell.
 
 ## v1.3.1 - 2026-07-12
 

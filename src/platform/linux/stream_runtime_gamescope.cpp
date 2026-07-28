@@ -247,15 +247,19 @@ namespace stream_runtime {
         if (socket_name_.empty() || !is_running_unlocked()) {
           return cmd;
         }
-        // Launch on gamescope X11/Wayland, not the host compositor.
+        // Attach path policy (SB-5): force X11 on gamescope XWayland so Steam/
+        // native titles do not paint on host Wayland (black portal stream).
+        // Nested WSI is only for the optional Big Picture polaris-hdr-session entry.
+        const auto display = x11_display_.empty() ? std::string {":1"} : x11_display_;
         std::ostringstream out;
-        out << "env -u ENABLE_GAMESCOPE_WSI -u ENABLE_HDR_WSI ";
-        out << "WAYLAND_DISPLAY=" << shell_quote(socket_name_) << " ";
-        out << "GAMESCOPE_WAYLAND_DISPLAY=" << shell_quote(socket_name_) << " ";
-        if (!x11_display_.empty()) {
-          out << "DISPLAY=" << shell_quote(x11_display_) << " ";
-        }
-        out << "bash -lc " << shell_quote(cmd);
+        out << "env -u WAYLAND_DISPLAY -u CLUTTER_BACKEND "
+            << "-u ELECTRON_OZONE_PLATFORM_HINT -u MOZ_ENABLE_WAYLAND "
+            << "-u ENABLE_GAMESCOPE_WSI -u ENABLE_HDR_WSI "
+            << "DISPLAY=" << shell_quote(display) << " "
+            << "GAMESCOPE_WAYLAND_DISPLAY=" << shell_quote(socket_name_) << " "
+            << "GDK_BACKEND=x11 SDL_VIDEODRIVER=x11 XDG_SESSION_TYPE=x11 "
+            << "QT_QPA_PLATFORM=xcb STEAM_MULTIPLE_XWAYLANDS=1 "
+            << "bash -lc " << shell_quote(cmd);
         return out.str();
       }
 

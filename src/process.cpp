@@ -764,7 +764,21 @@ namespace proc {
         return extract_digits(pos + std::string("-applaunch").size());
       }
 
+      // polaris-hdr-session prep: ".../polaris-hdr-session start <appid>"
+      // Used to unwrap mode-hardwired lea apps.json entries (SB-5).
+      if (boost::icontains(lower, "polaris-hdr-session")) {
+        if (auto pos = lower.rfind(" start "); pos != std::string::npos) {
+          if (auto id = extract_digits(pos + std::string(" start ").size()); id) {
+            return id;
+          }
+        }
+      }
+
       return std::nullopt;
+    }
+
+    bool command_uses_polaris_hdr_session(const std::string &cmd) {
+      return boost::icontains(cmd, "polaris-hdr-session");
     }
 
     std::string canonical_steam_library_big_picture_followup_command(const std::string &reference_cmd, const std::string &appid) {
@@ -1914,24 +1928,46 @@ namespace proc {
     }
 
     void normalize_steam_library_app(proc::ctx_t &ctx) {
-      if (!is_steam_library_app(ctx)) {
+      if (is_steam_big_picture_app(ctx)) {
         return;
       }
 
+      // SB-5: recover appid from polaris-hdr-session hardwire (prep "start <id>")
+      // so library games stay mode-neutral even before inject/migration rewrites apps.json.
       std::string appid = ctx.steam_appid;
+      const bool session_wired =
+        boost::iequals(ctx.source, "polaris-hdr-session") ||
+        command_uses_polaris_hdr_session(ctx.cmd) ||
+        std::any_of(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), [](const proc::cmd_t &cmd) {
+          return command_uses_polaris_hdr_session(cmd.do_cmd) ||
+                 command_uses_polaris_hdr_session(cmd.undo_cmd);
+        });
+
       if (appid.empty()) {
         if (const auto detected = extract_steam_appid_from_command(ctx.cmd); detected) {
           appid = *detected;
-        } else {
-          for (const auto &cmd : ctx.detached) {
-            if (const auto detected = extract_steam_appid_from_command(cmd); detected) {
-              appid = *detected;
-              break;
-            }
+        }
+      }
+      if (appid.empty()) {
+        for (const auto &cmd : ctx.detached) {
+          if (const auto detected = extract_steam_appid_from_command(cmd); detected) {
+            appid = *detected;
+            break;
+          }
+        }
+      }
+      if (appid.empty()) {
+        for (const auto &cmd : ctx.prep_cmds) {
+          if (const auto detected = extract_steam_appid_from_command(cmd.do_cmd); detected) {
+            appid = *detected;
+            break;
           }
         }
       }
 
+      if (appid.empty() && !is_steam_library_app(ctx) && !session_wired) {
+        return;
+      }
       if (appid.empty()) {
         return;
       }
@@ -1940,13 +1976,28 @@ namespace proc {
       ctx.source = "steam";
       ctx.steam_launch_mode = proc::normalize_steam_launch_mode(ctx.steam_launch_mode);
 
+      if (session_wired) {
+        // Drop per-app polaris-hdr-session shell; path runtime wraps env by mode.
+        BOOST_LOG(info) << "process: unwrapping polaris-hdr-session hardwire for Steam library appid="
+                        << appid << " (mode-neutral launch)"sv;
+        ctx.cmd.clear();
+        ctx.prep_cmds.erase(
+          std::remove_if(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), [](const proc::cmd_t &cmd) {
+            return command_uses_polaris_hdr_session(cmd.do_cmd) ||
+                   command_uses_polaris_hdr_session(cmd.undo_cmd);
+          }),
+          ctx.prep_cmds.end()
+        );
+        ctx.auto_detach = true;
+      }
+
       std::string reference_cmd = ctx.cmd;
       std::vector<nlohmann::json> preserved_detached;
       preserved_detached.reserve(ctx.detached.size());
 
       for (const auto &cmd : ctx.detached) {
-        if (command_is_steam_library_launch_component(cmd)) {
-          if (reference_cmd.empty()) {
+        if (command_is_steam_library_launch_component(cmd) || command_uses_polaris_hdr_session(cmd)) {
+          if (reference_cmd.empty() && !command_uses_polaris_hdr_session(cmd)) {
             reference_cmd = cmd;
           }
           continue;
@@ -1954,7 +2005,8 @@ namespace proc {
         preserved_detached.emplace_back(cmd);
       }
 
-      if (!ctx.cmd.empty() && command_is_steam_library_launch_component(ctx.cmd)) {
+      if (!ctx.cmd.empty() &&
+          (command_is_steam_library_launch_component(ctx.cmd) || command_uses_polaris_hdr_session(ctx.cmd))) {
         BOOST_LOG(info) << "process: converted Steam library primary command into detached launch components"sv;
         ctx.cmd.clear();
       }
@@ -5477,25 +5529,34 @@ namespace proc {
             strip_mangohud_env(cmd_env);
           }
           apply_gamepad_sdl_env(cmd_env);
+          // Path policy: attach env matches wrap_cmd (X11 on gamescope-0, no host Wayland).
           auto cage_socket = private_runtime->wayland_socket();
           if (cage_socket.empty()) {
             cage_socket = cage_display_router::get_wayland_socket();
           }
-          if (!cage_socket.empty()) {
-            cmd_env["WAYLAND_DISPLAY"] = cage_socket;
-            cmd_env["GAMESCOPE_WAYLAND_DISPLAY"] = cage_socket;
-            cmd_env["AT_SPI_BUS_ADDRESS"] = "";
-            auto cage_display = private_runtime->x11_display();
-            if (cage_display.empty()) {
-              cage_display = cage_display_router::get_x11_display();
-            }
-            if (!cage_display.empty()) {
-              cmd_env["DISPLAY"] = cage_display;
-            }
-            else {
-              cmd_env.erase("DISPLAY");
-            }
+          auto cage_display = private_runtime->x11_display();
+          if (cage_display.empty()) {
+            cage_display = cage_display_router::get_x11_display();
           }
+          if (cage_display.empty()) {
+            cage_display = ":1";
+          }
+          cmd_env.erase("WAYLAND_DISPLAY");
+          cmd_env.erase("CLUTTER_BACKEND");
+          cmd_env.erase("ELECTRON_OZONE_PLATFORM_HINT");
+          cmd_env.erase("MOZ_ENABLE_WAYLAND");
+          cmd_env.erase("ENABLE_GAMESCOPE_WSI");
+          cmd_env.erase("ENABLE_HDR_WSI");
+          cmd_env["AT_SPI_BUS_ADDRESS"] = "";
+          if (!cage_socket.empty()) {
+            cmd_env["GAMESCOPE_WAYLAND_DISPLAY"] = cage_socket;
+          }
+          cmd_env["DISPLAY"] = cage_display;
+          cmd_env["GDK_BACKEND"] = "x11";
+          cmd_env["SDL_VIDEODRIVER"] = "x11";
+          cmd_env["XDG_SESSION_TYPE"] = "x11";
+          cmd_env["QT_QPA_PLATFORM"] = "xcb";
+          cmd_env["STEAM_MULTIPLE_XWAYLANDS"] = "1";
           const auto launch_cmd = command_with_gamepad_isolation(cmd);
           boost::filesystem::path working_dir = _app.working_dir.empty() ?
                                                   find_working_directory(_app.detached[i], cmd_env) :
@@ -5604,16 +5665,38 @@ namespace proc {
       if (cage_socket.empty()) {
         cage_socket = cage_display_router::get_wayland_socket();
       }
-      if (!cage_socket.empty()) {
-        launch_env["WAYLAND_DISPLAY"] = cage_socket;
+      auto cage_display = private_runtime->x11_display();
+      if (cage_display.empty()) {
+        cage_display = cage_display_router::get_x11_display();
+      }
+      if (private_runtime->backend_id() == stream_display_policy::k_runtime_gamescope) {
+        // Same attach path policy as detached steam-appid launches (SB-5).
+        launch_env.erase("WAYLAND_DISPLAY");
+        launch_env.erase("CLUTTER_BACKEND");
+        launch_env.erase("ELECTRON_OZONE_PLATFORM_HINT");
+        launch_env.erase("MOZ_ENABLE_WAYLAND");
+        launch_env.erase("ENABLE_GAMESCOPE_WSI");
+        launch_env.erase("ENABLE_HDR_WSI");
         launch_env["AT_SPI_BUS_ADDRESS"] = "";
-        if (private_runtime->backend_id() == stream_display_policy::k_runtime_gamescope) {
+        if (!cage_socket.empty()) {
           launch_env["GAMESCOPE_WAYLAND_DISPLAY"] = cage_socket;
         }
-        auto cage_display = private_runtime->x11_display();
         if (cage_display.empty()) {
-          cage_display = cage_display_router::get_x11_display();
+          cage_display = ":1";
         }
+        launch_env["DISPLAY"] = cage_display;
+        launch_env["GDK_BACKEND"] = "x11";
+        launch_env["SDL_VIDEODRIVER"] = "x11";
+        launch_env["XDG_SESSION_TYPE"] = "x11";
+        launch_env["QT_QPA_PLATFORM"] = "xcb";
+        launch_env["STEAM_MULTIPLE_XWAYLANDS"] = "1";
+        BOOST_LOG(info) << "private_runtime: gamescope attach env DISPLAY="sv << cage_display
+                        << " GAMESCOPE_WAYLAND_DISPLAY="sv << cage_socket
+                        << " (WAYLAND_DISPLAY unset) for app command"sv;
+      }
+      else if (!cage_socket.empty()) {
+        launch_env["WAYLAND_DISPLAY"] = cage_socket;
+        launch_env["AT_SPI_BUS_ADDRESS"] = "";
         if (!cage_display.empty()) {
           launch_env["DISPLAY"] = cage_display;
           BOOST_LOG(info) << "private_runtime: Set WAYLAND_DISPLAY="sv << cage_socket
@@ -7162,8 +7245,145 @@ namespace proc {
     fileTree["version"] = this_version;
   }
 
+  void migration_v5(nlohmann::json &fileTree) {
+    // SB-5: persist mode-neutral Steam library apps. Nested gamescope WSI is
+    // path policy (stream_runtime wrap), not per-app polaris-hdr-session shell.
+    // Optional "Steam Big Picture" entry may keep the session helper.
+    static const int this_version = 9;
+    int file_version = json_int_member_or(fileTree, "version", 0);
+    if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
+      BOOST_LOG(info) << "Cannot parse apps.json version while unwrapping polaris-hdr-session apps, treating as v0.";
+    }
+
+    if (file_version >= this_version) {
+      return;
+    }
+
+    if (!fileTree.contains("apps") || !fileTree["apps"].is_array()) {
+      fileTree["version"] = this_version;
+      return;
+    }
+
+    int unwrapped = 0;
+    for (auto &app : fileTree["apps"]) {
+      if (!app.is_object()) {
+        continue;
+      }
+
+      const auto app_name = json_string_member_or(app, "name");
+      if (is_steam_big_picture_name(app_name)) {
+        continue;
+      }
+
+      const auto source = json_string_member_or(app, "source");
+      const auto cmd = json_string_member_or(app, "cmd");
+      bool session_wired = boost::iequals(source, "polaris-hdr-session") ||
+                           command_uses_polaris_hdr_session(cmd);
+
+      std::string appid = json_string_member_or(app, "steam-appid");
+      if (app.contains("prep-cmd") && app["prep-cmd"].is_array()) {
+        for (const auto &prep : app["prep-cmd"]) {
+          if (!prep.is_object()) {
+            continue;
+          }
+          const auto do_cmd = json_string_member_or(prep, "do");
+          const auto undo_cmd = json_string_member_or(prep, "undo");
+          if (command_uses_polaris_hdr_session(do_cmd) || command_uses_polaris_hdr_session(undo_cmd)) {
+            session_wired = true;
+          }
+          if (appid.empty()) {
+            if (const auto detected = extract_steam_appid_from_command(do_cmd); detected) {
+              appid = *detected;
+            }
+          }
+        }
+      }
+      if (appid.empty() && app.contains("detached") && app["detached"].is_array()) {
+        for (const auto &detached_val : app["detached"]) {
+          if (!detached_val.is_string()) {
+            continue;
+          }
+          const auto detached_cmd = detached_val.get<std::string>();
+          if (command_uses_polaris_hdr_session(detached_cmd)) {
+            session_wired = true;
+          }
+          if (appid.empty()) {
+            if (const auto detected = extract_steam_appid_from_command(detached_cmd); detected) {
+              appid = *detected;
+            }
+          }
+        }
+      }
+      if (appid.empty()) {
+        if (const auto detected = extract_steam_appid_from_command(cmd); detected) {
+          appid = *detected;
+        }
+      }
+
+      if (!session_wired || appid.empty()) {
+        continue;
+      }
+
+      app["source"] = "steam";
+      app["steam-appid"] = appid;
+      app["steam-launch-mode"] = std::string {proc::STEAM_LAUNCH_MODE_DIRECT};
+      app["cmd"] = "";
+      app["auto-detach"] = true;
+      app["wait-all"] = true;
+      if (!app.contains("exit-timeout")) {
+        app["exit-timeout"] = 5;
+      }
+
+      const auto canonical = canonical_steam_library_launch_commands(
+        "steam",
+        appid,
+        std::string {proc::STEAM_LAUNCH_MODE_DIRECT}
+      );
+      nlohmann::json detached = nlohmann::json::array();
+      for (const auto &launch_cmd : canonical) {
+        detached.push_back(launch_cmd);
+      }
+      app["detached"] = std::move(detached);
+
+      nlohmann::json prep = nlohmann::json::array();
+      if (app.contains("prep-cmd") && app["prep-cmd"].is_array()) {
+        for (const auto &entry : app["prep-cmd"]) {
+          if (!entry.is_object()) {
+            continue;
+          }
+          const auto do_cmd = json_string_member_or(entry, "do");
+          const auto undo_cmd = json_string_member_or(entry, "undo");
+          if (command_uses_polaris_hdr_session(do_cmd) || command_uses_polaris_hdr_session(undo_cmd)) {
+            continue;
+          }
+          prep.push_back(entry);
+        }
+      }
+      bool has_shutdown = false;
+      for (const auto &entry : prep) {
+        if (entry.is_object() && command_requests_steam_shutdown(json_string_member_or(entry, "undo"))) {
+          has_shutdown = true;
+          break;
+        }
+      }
+      if (!has_shutdown) {
+        prep.push_back({{"undo", "setsid steam -shutdown"}});
+      }
+      app["prep-cmd"] = std::move(prep);
+
+      BOOST_LOG(info) << "Migrated polaris-hdr-session hardwire for [" << json_app_label(app)
+                      << "] to mode-neutral steam-appid=" << appid;
+      ++unwrapped;
+    }
+
+    fileTree["version"] = this_version;
+    if (unwrapped > 0) {
+      BOOST_LOG(info) << "Migrated " << unwrapped << " Steam library apps to mode-neutral launch (SB-5 v9).";
+    }
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 8;
+    int last_version = 9;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -7174,6 +7394,7 @@ namespace proc {
       migration_v2(fileTree);
       migration_v3(fileTree);
       migration_v4(fileTree);
+      migration_v5(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }

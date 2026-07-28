@@ -12,7 +12,7 @@
 | #2 Clean stop / RST | **Code landed (verify)** | Root cause: async capture stop raced pidfd kill of gamescope → polaris SEGV in `pw_stream_queue_buffer` / gamescope `CVulkanDevice` dtor (coredump stacks). Fix: sync `prepare_for_session_teardown` before terminate; shared by browser stop, terminate_impl, WebUI disconnect. Re-run gate after deploy. |
 | #3 WebUI disconnect | **Code landed (verify)** | Same prepare path in `disconnect` + `terminate_impl`; should return body when polaris survives stop. Re-run gate after deploy. |
 | #4 Cancel 470 | **Code landed** | Controller role; owner case-insensitive; owner skips stale sessiontoken; cancel preflight + respond-first. Not re-proven this gate run (no Moonlight cancel step). |
-| #5 Mode-agnostic apps | **Code landed** | Polaris gamescope runtime wraps detached steam-appid launches (no hdr-session hardwire). luxusAi inject: explicit non-gamescope modes stay neutral; legacy portal+no-cage only when mode unset. E2E mode-switch still open. |
+| #5 Mode-agnostic apps | **Code landed** | Import + apps.json stay mode-neutral (`steam-appid`). migration v9 / inject unwrap lea hardwires. gamescope path applies attach env via wrap_cmd (X11 on gamescope-0). Nested WSI only for optional Big Picture entry. E2E mode-switch still open. |
 | #6 Smoke harness | **Partial** | `solid-base-gate.sh` runs end-to-end; this run **fail**. Need `--max-time` on curl stop/disconnect helpers so agent runs cannot hang forever. |
 | #7 Portal units | **Ok this run** | Gate **units=ok screencast=ok**. |
 | Portal token/cursor | **Code landed** | Keep restore_token; invalidate+retry once on SelectSources failure; wait for AvailableCursorModes≠0; never permanently disable tokens. |
@@ -139,7 +139,8 @@ All Steam imports: `polaris-hdr-session start|wait`. Mode switches need manual a
 - [x] SB-2 portal release before nested kill (`release_global_capture`) (2026-07-28 code)
 - [x] SB-2 sync capture join before gamescope kill (browser_stream + terminate_impl + disconnect) (2026-07-28)
 - [x] Portal restore_token invalidate+retry + cursor wait (2026-07-28)
-- [x] SB-5 gamescope wrap detached steam-appid + inject mode-explicit (2026-07-28)
+- [x] SB-5 gamescope wrap detached steam-appid + inject always-neutral unwrap (2026-07-28)
+- [x] SB-5 migration v9 + load normalize unwrap polaris-hdr-session library hardwire (2026-07-28)
 - [ ] SB-4 Moonlight `/cancel` re-smoke (not in this gate line)
 - [ ] SB-2 post-deploy Moonlight connect/disconnect without client-visible fail / host SEGV
 - [ ] SB-5 E2E labwc / dongle / gamescope mode switch with stock apps.json
