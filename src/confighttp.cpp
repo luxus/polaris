@@ -4068,49 +4068,54 @@ namespace confighttp {
       // Host-operator path: WebUI disconnect must fully end the stream (RTSP +
       // app + path cleanup), not only stop one RTSP session by uuid.
       // Moonlight cancel keeps ownership rules; Dashboard is force-stop.
-      // SB-2: drop Browser Stream capture/portal before nested kill so polaris
-      // survives and this HTTPS handler can still write a response body.
+      // SB-2: (1) drop capture/portal with bounded join, (2) answer HTTPS,
+      // (3) nested kill — never let gamescope/process teardown wedge :47990.
+      BOOST_LOG(info) << "WebUI disconnect: prepare capture/portal teardown"sv;
       browser_stream::prepare_for_session_teardown();
-      bool stopped = false;
-      if (!uuid.empty()) {
-        const auto shutdown = proc::proc.request_session_shutdown(uuid, {}, true, false);
-        stopped = shutdown.stopped ||
-                  shutdown.snapshot.outcome == proc::session_stop_outcome_t::allowed ||
-                  shutdown.snapshot.outcome == proc::session_stop_outcome_t::no_active_session;
-        if (!stopped) {
-          // Owner/token mismatch or residual app: still force-end for operator.
-          BOOST_LOG(info) << "WebUI disconnect: force-stop after outcome="
-                          << static_cast<int>(shutdown.snapshot.outcome);
-          rtsp_stream::terminate_sessions();
-          proc::proc.terminate();
-          stopped = true;
-        }
-      }
-      else {
-        // No uuid: disconnect current active session(s).
-        const auto owner = proc::proc.get_session_owner_unique_id();
-        if (!owner.empty()) {
-          const auto shutdown = proc::proc.request_session_shutdown(owner, {}, true, false);
-          stopped = shutdown.stopped ||
-                    shutdown.snapshot.outcome == proc::session_stop_outcome_t::allowed ||
-                    shutdown.snapshot.outcome == proc::session_stop_outcome_t::no_active_session;
-        }
-        if (!stopped) {
-          rtsp_stream::terminate_sessions();
-          if (proc::proc.running() > 0) {
+
+      // Operator force-stop always reports success after media is dropped so the
+      // gate/WebUI get a body even if residual RTSP/app kill is slow.
+      output_tree["status"] = true;
+      output_tree["force"] = true;
+      BOOST_LOG(info) << "WebUI disconnect: responding before nested force-stop"sv;
+      send_response(response, output_tree);
+
+      // Nested teardown after the response — log failures, never rewrite body.
+      try {
+        if (!uuid.empty()) {
+          const auto shutdown = proc::proc.request_session_shutdown(uuid, {}, true, false);
+          const bool stopped = shutdown.stopped ||
+                               shutdown.snapshot.outcome == proc::session_stop_outcome_t::allowed ||
+                               shutdown.snapshot.outcome == proc::session_stop_outcome_t::no_active_session;
+          if (!stopped) {
+            BOOST_LOG(info) << "WebUI disconnect: force-stop after outcome="
+                            << static_cast<int>(shutdown.snapshot.outcome);
+            rtsp_stream::terminate_sessions();
             proc::proc.terminate();
           }
-          stopped = true;
+          nvhttp::find_and_stop_session(uuid, true);
         }
+        else {
+          // No uuid: disconnect current active session(s).
+          bool stopped = false;
+          const auto owner = proc::proc.get_session_owner_unique_id();
+          if (!owner.empty()) {
+            const auto shutdown = proc::proc.request_session_shutdown(owner, {}, true, false);
+            stopped = shutdown.stopped ||
+                      shutdown.snapshot.outcome == proc::session_stop_outcome_t::allowed ||
+                      shutdown.snapshot.outcome == proc::session_stop_outcome_t::no_active_session;
+          }
+          if (!stopped) {
+            BOOST_LOG(info) << "WebUI disconnect: force-stop active session(s)"sv;
+            rtsp_stream::terminate_sessions();
+            if (proc::proc.running() > 0) {
+              proc::proc.terminate();
+            }
+          }
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "WebUI disconnect: nested force-stop failed: "sv << e.what();
       }
-      // Best-effort: also stop named client RTSP if still present.
-      if (!uuid.empty()) {
-        nvhttp::find_and_stop_session(uuid, true);
-      }
-
-      output_tree["status"] = stopped;
-      output_tree["force"] = true;
-      send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Disconnect: "sv << e.what();
       bad_request(response, request, e.what());
@@ -4575,14 +4580,29 @@ namespace confighttp {
 
     // SB-2: always release capture first so a missing/stale token still leaves
     // the host without a live portal stream into gamescope (gate stream_stop).
+    // prepare is bounded (≤3s join) so :47990 cannot hang until force-shutdown.
+    BOOST_LOG(info) << "BrowserStreamStop: prepare capture/portal teardown"sv;
     browser_stream::prepare_for_session_teardown();
-    const bool stopped = !token.empty() && browser_stream::stop_session(token);
+
+    // Stop helper/token accounting without nested app kill — answer HTTP first
+    // so gamescope pidfd-kill cannot block the confighttp thread (stack: join
+    // hang → empty body → SIGTERM 10s SIGTRAP).
+    browser_stream::stop_session_result_t result;
+    if (!token.empty()) {
+      result = browser_stream::stop_session(token, /*terminate_owned_app=*/false);
+    }
 
     nlohmann::json output;
     output["status"] = true;
-    output["stopped"] = stopped;
-    // Answer the WebUI before any residual nested undo work can wedge accept.
+    output["stopped"] = result.stopped;
+    BOOST_LOG(info) << "BrowserStreamStop: responding stopped="sv << result.stopped
+                    << " owns_app="sv << result.owns_app;
     send_response(response, output);
+
+    if (result.owns_app) {
+      BOOST_LOG(info) << "BrowserStreamStop: terminate owned app after HTTP response"sv;
+      proc::proc.terminate(false, false);
+    }
   }
 
   /**

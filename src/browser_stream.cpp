@@ -782,8 +782,10 @@ namespace browser_stream {
       const auto session_token = message->value("session_token", "");
 
       if (message_type == "transport_closed") {
-        const auto stopped = stop_session(session_token);
-        BOOST_LOG(info) << "Browser Stream transport closed; backend stop requested="sv << stopped;
+        // IPC path: terminate owned app here (no HTTP response to protect).
+        const auto result = stop_session(session_token, true);
+        BOOST_LOG(info) << "Browser Stream transport closed; backend stop requested="sv
+                        << result.stopped << " owns_app="sv << result.owns_app;
         write_input_ipc_response(socket, true, "");
         return;
       }
@@ -1612,29 +1614,40 @@ namespace browser_stream {
     // 4) only then may terminate_impl pidfd-kill gamescope/labwc
     // Previous order joined *before* portal release → hang in stop_video_capture
     // while PW stayed attached into a dying compositor (SIGTRAP + gamescope SEGV).
+    //
+    // Deployed pre-bcd6f02 lea stack: postBrowserStreamStop → prepare →
+    // stop_video_capture → unbounded thread::join while capture sat in portal
+    // wait_for_response / video::capture_thread_async join → :47990 wedge →
+    // SIGTERM 10s force-shutdown SIGTRAP + gamescope CVulkanDevice SEGV.
     const bool had_media = video_capture_active() || audio_capture_active();
+    BOOST_LOG(info) << "Browser Stream teardown: step1 signal capture shutdown (had_media="sv
+                    << had_media << ")"sv;
     auto state = take_capture_state_for_stop();
 #ifdef POLARIS_BUILD_PORTAL
+    BOOST_LOG(info) << "Browser Stream teardown: step2 release portal/PipeWire"sv;
     portal::release_global_capture();
 #endif
+    BOOST_LOG(info) << "Browser Stream teardown: step3 bounded capture join (3s)"sv;
     finish_video_capture_stop(std::move(state), 3s);
     // Only settle when we actually dropped a live capture — avoids stacking
     // 100ms delays when prepare is called from stop + terminate + disconnect.
     if (had_media) {
       std::this_thread::sleep_for(100ms);
+      BOOST_LOG(info) << "Browser Stream teardown: ready for nested compositor kill"sv;
     }
 #endif
   }
 
-  bool stop_session(std::string_view token) {
+  stop_session_result_t stop_session(std::string_view token, bool terminate_owned_app) {
     auto record = take_session_token(token);
-    bool stopped = record.has_value();
+    stop_session_result_t result;
+    result.stopped = record.has_value();
 #ifdef __linux__
     bool should_stop_capture = false;
-    bool should_stop_app = record && record->owns_app;
+    result.owns_app = record && record->owns_app;
     {
       std::lock_guard lock(helper_mutex);
-      if (stopped && helper_running_locked()) {
+      if (result.stopped && helper_running_locked()) {
         std::string error;
         nlohmann::json message {
           {"ipc_token", helper_state.ipc_token},
@@ -1648,14 +1661,15 @@ namespace browser_stream {
     }
     // Always drop capture when this token owned media, even if the helper
     // already exited (partial stop / crash recovery).
-    if (should_stop_capture || should_stop_app || video_capture_active() || audio_capture_active()) {
+    if (should_stop_capture || result.owns_app || video_capture_active() || audio_capture_active()) {
       prepare_for_session_teardown();
     }
-    if (should_stop_app) {
+    if (result.owns_app && terminate_owned_app) {
+      BOOST_LOG(info) << "Browser Stream stop_session: terminating owned app"sv;
       proc::proc.terminate(false, false);
     }
 #endif
-    return stopped;
+    return result;
   }
 
   nlohmann::json status_json() {

@@ -209,7 +209,7 @@ TEST(SessionStopContractTests, BrowserStreamStopJoinsCaptureBeforeAppTerminate) 
   // CVulkanDevice dtor. stop_session must sync-join capture before terminate.
   const auto source = read_source_for_contract("src/browser_stream.cpp");
   ASSERT_FALSE(source.empty());
-  const auto stop_start = source.find("bool stop_session(std::string_view token)");
+  const auto stop_start = source.find("stop_session_result_t stop_session(");
   ASSERT_NE(stop_start, std::string::npos);
   const auto stop_end = source.find("nlohmann::json status_json()", stop_start);
   ASSERT_NE(stop_end, std::string::npos);
@@ -221,6 +221,8 @@ TEST(SessionStopContractTests, BrowserStreamStopJoinsCaptureBeforeAppTerminate) 
   EXPECT_LT(prepare, terminate);
   // Async stop must not race terminate on the stop path.
   EXPECT_EQ(body.find("stop_video_capture_async("), std::string::npos);
+  // HTTP can defer terminate; flag must exist.
+  EXPECT_NE(body.find("terminate_owned_app"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, PrepareForSessionTeardownReleasesPortalBeforeJoin) {
@@ -286,10 +288,39 @@ TEST(SessionStopContractTests, WebUiDisconnectPreparesBrowserCaptureBeforeForceS
   ASSERT_NE(end, std::string::npos);
   const auto body = source.substr(start, end - start);
   const auto prepare = body.find("browser_stream::prepare_for_session_teardown(");
+  const auto respond = body.find("send_response(");
   const auto force = body.find("proc::proc.terminate(");
   ASSERT_NE(prepare, std::string::npos);
+  ASSERT_NE(respond, std::string::npos);
   ASSERT_NE(force, std::string::npos);
-  EXPECT_LT(prepare, force);
+  // SB-2: answer HTTPS after bounded prepare, before nested kill.
+  EXPECT_LT(prepare, respond);
+  EXPECT_LT(respond, force);
+}
+
+TEST(SessionStopContractTests, BrowserStreamStopRespondsBeforeOwnedAppTerminate) {
+  // SB-2: confighttp must not join/terminate nested compositor before writing
+  // the stop JSON body (gate stream_stop empty body / :47990 wedge).
+  const auto source = read_source_for_contract("src/confighttp.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto start = source.find("void postBrowserStreamStop(");
+  ASSERT_NE(start, std::string::npos);
+  const auto end = source.find("void getVDisplayBackends(", start);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
+  const auto prepare = body.find("browser_stream::prepare_for_session_teardown(");
+  const auto stop = body.find("browser_stream::stop_session(");
+  const auto respond = body.find("send_response(");
+  const auto terminate = body.find("proc::proc.terminate(");
+  ASSERT_NE(prepare, std::string::npos);
+  ASSERT_NE(stop, std::string::npos);
+  ASSERT_NE(respond, std::string::npos);
+  ASSERT_NE(terminate, std::string::npos);
+  EXPECT_LT(prepare, stop);
+  EXPECT_LT(stop, respond);
+  EXPECT_LT(respond, terminate);
+  // stop_session must defer app kill on this path.
+  EXPECT_NE(body.find("terminate_owned_app"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, DuplicateStopIsRejectedWhileStopIsInProgress) {
