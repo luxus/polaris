@@ -99,8 +99,8 @@ namespace stream_runtime {
       active_encoder_requires_gpu_native_capture,
       runtime_gpu_native_override_active
     );
-    if (resolved.private_runtime == private_runtime_e::GAMESCOPE) {
-      return acquire(private_runtime_e::GAMESCOPE);
+    if (resolved.private_runtime == stream_display_policy::private_runtime_e::GAMESCOPE) {
+      return acquire(stream_display_policy::private_runtime_e::GAMESCOPE);
     }
     if (!resolved.use_private_runtime && !resolved.use_cage_runtime) {
       return nullptr;
