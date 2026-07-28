@@ -929,7 +929,11 @@ namespace pipewire_capture {
       cap->set_terminal(wait_result_e::reinit);
       return;
     }
-    const auto dmabuf_negotiated = want_dmabuf && (offered_dmabuf || !has_modifier);
+    // Host KDE ScreenCast often advertises BGRx without SPA_VIDEO_FLAG_MODIFIER and
+    // then delivers MemFd/SHM buffers. Claiming DMA-BUF in that case selects the
+    // GPU encode factory while frames stay on the CPU → black video. Only negotiate
+    // DMA-BUF when the producer explicitly set a modifier (gamescope portal does).
+    const auto dmabuf_negotiated = want_dmabuf && has_modifier && offered_dmabuf;
     BOOST_LOG(info) << "portal: dmabuf_negotiate"
                     << " may_use="sv << (cap->options_.may_use_dmabuf ? "true"sv : "false"sv)
                     << " force_cpu="sv << (force_cpu ? "true"sv : "false"sv)
@@ -941,7 +945,11 @@ namespace pipewire_capture {
                     << " negotiated="sv << (dmabuf_negotiated ? "true"sv : "false"sv)
                     << " flags="sv << raw_info.flags;
     if (dmabuf_negotiated) {
-      BOOST_LOG(info) << "portal: PipeWire LINEAR DMA-BUF path enabled"sv;
+      BOOST_LOG(info) << "portal: PipeWire DMA-BUF path enabled (modifier="sv
+                      << effective_modifier << ")"sv;
+    }
+    else if (want_dmabuf && !has_modifier) {
+      BOOST_LOG(info) << "portal: PipeWire CPU/MemFd path (producer omitted modifier; host KDE typical)"sv;
     }
 
     pw_buffer *replaced_buffer = nullptr;
