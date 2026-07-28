@@ -246,7 +246,8 @@ namespace audio {
     auto next_audio_route_check = std::chrono::steady_clock::now();
 
     while (!shutdown_event->peek()) {
-      // Discover new session streams occasionally; never thrash (re-pin is sticky).
+      // Re-pin session streams that left the capture sink (EE reclaim); 3s poll,
+      // platform side enforces 10s cooldown per sink-input (no 1Hz crackle thrash).
       if (route_without_default && std::chrono::steady_clock::now() >= next_audio_route_check) {
         control->route_process_audio_to_sink(sink);
         next_audio_route_check = std::chrono::steady_clock::now() + 3s;
