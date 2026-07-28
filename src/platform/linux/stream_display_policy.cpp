@@ -416,6 +416,14 @@ namespace stream_display_policy {
         else if (path->runtime == stream_path::runtime_kind_e::GAMESCOPE) {
           linux_display.private_runtime = std::string {k_runtime_gamescope};
         }
+        // headless_dongle must never ScreenCast: force KMS capture on load so a
+        // stale capture=portal (or empty auto) cannot open the wrong backend.
+        if (path->id == stream_path::k_headless_dongle) {
+          if (config::video.capture.empty() || config::video.capture == "portal" ||
+              config::video.capture == "auto") {
+            config::video.capture = "kms";
+          }
+        }
         return;
       }
       linux_display.stream_mode.clear();
