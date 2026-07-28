@@ -85,6 +85,26 @@ TEST(PortalGrabPolicyTests, EnsureGlobalCaptureLockContractAndUniqueTokens) {
   EXPECT_NE(body.find("POLARIS_PORTAL_DBUS_ADDRESS"), std::string::npos);
   EXPECT_NE(body.find("polaris-hdr-force"), std::string::npos);
   EXPECT_NE(body.find("pipewire_capture::capture_t"), std::string::npos);
+
+  // Ensure the primary self-deadlock cannot regress: extract ensure_global_capture
+  // and require it never calls the locking ensure_global_session() helper.
+  const auto fn_start = body.find("static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(");
+  ASSERT_NE(fn_start, std::string::npos);
+  const auto fn_end = body.find("class portal_display_t", fn_start);
+  ASSERT_NE(fn_end, std::string::npos);
+  const auto fn = body.substr(fn_start, fn_end - fn_start);
+  EXPECT_NE(fn.find("ensure_global_session_unlocked()"), std::string::npos);
+  EXPECT_NE(fn.find("Wait outside g_portal_mu"), std::string::npos);
+  auto stripped = fn;
+  for (;;) {
+    const auto p = stripped.find("ensure_global_session_unlocked");
+    if (p == std::string::npos) {
+      break;
+    }
+    stripped.replace(p, sizeof("ensure_global_session_unlocked") - 1, "UNLOCKED_OK");
+  }
+  EXPECT_EQ(stripped.find("ensure_global_session("), std::string::npos)
+    << "ensure_global_capture must not call locking ensure_global_session() under g_portal_mu";
 }
 
 TEST(PortalGrabPolicyTests, HeadlessDongleNormalizeForcesKmsCapture) {
