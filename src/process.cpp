@@ -4443,9 +4443,34 @@ namespace proc {
       config::video.color_range = *resolved_optimization.color_range;
     }
 
-    if (resolved_optimization.hdr.has_value()) {
+    // device_db sets hdr from hdr_capable (capability), not a session request.
+    // Only client_profile (optimization_locks.hdr) may force enable_hdr.
+    if (resolved_optimization.hdr.has_value() && optimization_locks.hdr) {
       launch_session->enable_hdr = *resolved_optimization.hdr;
+    } else if (resolved_optimization.hdr.has_value() &&
+               *resolved_optimization.hdr != launch_session->enable_hdr) {
+      BOOST_LOG(info) << "Ignoring non-profile HDR optimization (device_db/ai capability) "
+                      << (*resolved_optimization.hdr ? "enabled"sv : "disabled"sv)
+                      << "; keeping client enable_hdr="sv
+                      << (launch_session->enable_hdr ? "true"sv : "false"sv);
     }
+
+#ifdef __linux__
+    // Portal is_hdr reads this file. Write from final enable_hdr only.
+    // Never restart gamescope or rewrite from encoder probe. Session owns restart.
+    {
+      const char *rt = std::getenv("XDG_RUNTIME_DIR");
+      if (rt && *rt) {
+        const auto force_path = std::filesystem::path(rt) / "polaris-hdr-force";
+        std::ofstream out(force_path, std::ios::trunc);
+        out << (launch_session->enable_hdr ? "1" : "0") << '\n';
+        BOOST_LOG(info) << "portal HDR force -> "sv
+                        << (launch_session->enable_hdr ? "1"sv : "0"sv)
+                        << " from enable_hdr="sv
+                        << (launch_session->enable_hdr ? "true"sv : "false"sv);
+      }
+    }
+#endif
 
     if (resolved_optimization.virtual_display.has_value()) {
       launch_session->virtual_display = *resolved_optimization.virtual_display;
