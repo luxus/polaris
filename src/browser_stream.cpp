@@ -1638,7 +1638,7 @@ namespace browser_stream {
 #endif
   }
 
-  stop_session_result_t stop_session(std::string_view token, bool terminate_owned_app) {
+  stop_session_result_t stop_session(std::string_view token, bool terminate_owned_app, bool release_media) {
     auto record = take_session_token(token);
     stop_session_result_t result;
     result.stopped = record.has_value();
@@ -1659,9 +1659,10 @@ namespace browser_stream {
         stop_helper_locked();
       }
     }
-    // Always drop capture when this token owned media, even if the helper
-    // already exited (partial stop / crash recovery).
-    if (should_stop_capture || result.owns_app || video_capture_active() || audio_capture_active()) {
+    // Drop capture when this token owned media (unless caller defers prepare
+    // until after the HTTPS response — HTTP stop handlers set release_media=false).
+    if (release_media &&
+        (should_stop_capture || result.owns_app || video_capture_active() || audio_capture_active())) {
       prepare_for_session_teardown();
     }
     if (result.owns_app && terminate_owned_app) {

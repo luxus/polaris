@@ -603,9 +603,12 @@ namespace portal {
 
     ~pw_capture_t() {
       running = false;
+      frame_cv.notify_all();
       // Stop the loop first, then disconnect/destroy the stream under the loop
       // lock so state_changed/process cannot run against a freed capture_t
       // (SEGV on stream stop / unit restart — SB-2).
+      // Note: pw_thread_loop_stop may block; callers must not run this dtor on
+      // the HTTPS thread without a timeout wrapper (see release_global_capture).
       if (pw_loop) {
         pw_thread_loop_stop(pw_loop);
         pw_thread_loop_lock(pw_loop);
@@ -1108,6 +1111,10 @@ namespace portal {
   // SB-2: release PipeWire + portal Session *before* gamescope/labwc is killed.
   // Holding a live PW stream into a dying compositor SEGV's gamescope
   // (CVulkanDevice dtor) and occasionally polaris itself.
+  //
+  // ~pw_capture_t / pw_thread_loop_stop can block indefinitely when the stream
+  // is still attached to gamescope. Never run those dtors on the confighttp
+  // thread (lea 2026-07-28: step2 hung past curl max-time with empty stop body).
   void release_global_capture() {
     std::shared_ptr<pw_capture_t> capture;
     std::unique_ptr<portal_session_t> portal;
@@ -1121,17 +1128,40 @@ namespace portal {
       portal = std::move(g_portal);
       g_node_id = 0;
     }
-    // Stop the capture loop before dropping our ref so waiters wake and exit
-    // instead of blocking join past force-shutdown.
+    // Wake capture() waiters immediately so video threads can exit even while
+    // PipeWire dtor work continues on a helper thread.
     if (capture) {
       capture->running = false;
       capture->frame_cv.notify_all();
     }
-    // Destructors outside the mutex: PW loop stop can take a moment and must
-    // not serialize against a concurrent re-acquire on the next stream.
-    // If capture() still holds a shared_ptr, dtor runs when that loop exits.
-    capture.reset();
-    portal.reset();
+
+    // Bound wait for a "nice" destroy; always return promptly to the caller.
+    // Leftover ownership is drained on a detached thread so :47990 cannot wedge.
+    constexpr auto k_sync_budget = std::chrono::milliseconds(400);
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    std::thread destroyer {[capture = std::move(capture), portal = std::move(portal), done]() mutable {
+      BOOST_LOG(info) << "portal: async capture/session destroy begin"sv;
+      capture.reset();
+      portal.reset();
+      done->store(true, std::memory_order_release);
+      BOOST_LOG(info) << "portal: async capture/session destroy done"sv;
+    }};
+    const auto deadline = std::chrono::steady_clock::now() + k_sync_budget;
+    while (!done->load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (done->load(std::memory_order_acquire)) {
+      if (destroyer.joinable()) {
+        destroyer.join();
+      }
+    }
+    else {
+      BOOST_LOG(warning) << "portal: capture/session destroy exceeded "
+                         << k_sync_budget.count()
+                         << "ms; detaching so HTTPS stop can return"sv;
+      destroyer.detach();
+    }
   }
 
   static bool ensure_global_session_unlocked() {

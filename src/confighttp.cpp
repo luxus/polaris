@@ -4068,20 +4068,18 @@ namespace confighttp {
       // Host-operator path: WebUI disconnect must fully end the stream (RTSP +
       // app + path cleanup), not only stop one RTSP session by uuid.
       // Moonlight cancel keeps ownership rules; Dashboard is force-stop.
-      // SB-2: (1) drop capture/portal with bounded join, (2) answer HTTPS,
-      // (3) nested kill — never let gamescope/process teardown wedge :47990.
-      BOOST_LOG(info) << "WebUI disconnect: prepare capture/portal teardown"sv;
-      browser_stream::prepare_for_session_teardown();
-
-      // Operator force-stop always reports success after media is dropped so the
-      // gate/WebUI get a body even if residual RTSP/app kill is slow.
+      // SB-2: answer HTTPS first, then portal/capture + nested kill off the
+      // critical path for the response body (pw_thread_loop_stop can hang).
       output_tree["status"] = true;
       output_tree["force"] = true;
-      BOOST_LOG(info) << "WebUI disconnect: responding before nested force-stop"sv;
+      BOOST_LOG(info) << "WebUI disconnect: responding before capture/nested teardown"sv;
       send_response(response, output_tree);
 
       // Nested teardown after the response — log failures, never rewrite body.
       try {
+        BOOST_LOG(info) << "WebUI disconnect: prepare capture/portal teardown"sv;
+        browser_stream::prepare_for_session_teardown();
+
         if (!uuid.empty()) {
           const auto shutdown = proc::proc.request_session_shutdown(uuid, {}, true, false);
           const bool stopped = shutdown.stopped ||
@@ -4578,26 +4576,31 @@ namespace confighttp {
       BOOST_LOG(warning) << "BrowserStreamStop: "sv << e.what();
     }
 
-    // SB-2: always release capture first so a missing/stale token still leaves
-    // the host without a live portal stream into gamescope (gate stream_stop).
-    // prepare is bounded (≤3s join) so :47990 cannot hang until force-shutdown.
-    BOOST_LOG(info) << "BrowserStreamStop: prepare capture/portal teardown"sv;
-    browser_stream::prepare_for_session_teardown();
-
-    // Stop helper/token accounting without nested app kill — answer HTTP first
-    // so gamescope pidfd-kill cannot block the confighttp thread (stack: join
-    // hang → empty body → SIGTERM 10s SIGTRAP).
+    // SB-2: answer HTTPS *before* any portal/PW/capture join work.
+    // lea 2026-07-28: prepare hung inside portal release (pw_thread_loop_stop)
+    // → empty curl body even after bounded join was added. Token/helper stop
+    // runs without prepare; media teardown + app kill happen after the write.
     browser_stream::stop_session_result_t result;
     if (!token.empty()) {
-      result = browser_stream::stop_session(token, /*terminate_owned_app=*/false);
+      result = browser_stream::stop_session(
+        token,
+        /*terminate_owned_app=*/false,
+        /*release_media=*/false
+      );
     }
 
     nlohmann::json output;
+    // Operator force-stop always acknowledges so the gate/WebUI get a body
+    // even if residual media teardown is still draining PipeWire.
     output["status"] = true;
-    output["stopped"] = result.stopped;
-    BOOST_LOG(info) << "BrowserStreamStop: responding stopped="sv << result.stopped
-                    << " owns_app="sv << result.owns_app;
+    output["stopped"] = true;
+    output["token_matched"] = result.stopped;
+    BOOST_LOG(info) << "BrowserStreamStop: responding before teardown token_ok="sv
+                    << result.stopped << " owns_app="sv << result.owns_app;
     send_response(response, output);
+
+    BOOST_LOG(info) << "BrowserStreamStop: prepare capture/portal teardown"sv;
+    browser_stream::prepare_for_session_teardown();
 
     if (result.owns_app) {
       BOOST_LOG(info) << "BrowserStreamStop: terminate owned app after HTTP response"sv;

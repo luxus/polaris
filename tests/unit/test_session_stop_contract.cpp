@@ -279,7 +279,7 @@ TEST(SessionStopContractTests, TerminateImplStopsBrowserCaptureBeforeIsolatedKil
   EXPECT_LT(release, kill);
 }
 
-TEST(SessionStopContractTests, WebUiDisconnectPreparesBrowserCaptureBeforeForceStop) {
+TEST(SessionStopContractTests, WebUiDisconnectRespondsBeforeCaptureAndForceStop) {
   const auto source = read_source_for_contract("src/confighttp.cpp");
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void disconnect(resp_https_t response, req_https_t request)");
@@ -293,9 +293,10 @@ TEST(SessionStopContractTests, WebUiDisconnectPreparesBrowserCaptureBeforeForceS
   ASSERT_NE(prepare, std::string::npos);
   ASSERT_NE(respond, std::string::npos);
   ASSERT_NE(force, std::string::npos);
-  // SB-2: answer HTTPS after bounded prepare, before nested kill.
-  EXPECT_LT(prepare, respond);
-  EXPECT_LT(respond, force);
+  // SB-2: answer HTTPS before portal/PW teardown and nested kill — release can
+  // hang in pw_thread_loop_stop even with a join budget.
+  EXPECT_LT(respond, prepare);
+  EXPECT_LT(prepare, force);
 }
 
 TEST(SessionStopContractTests, BrowserStreamStopRespondsBeforeOwnedAppTerminate) {
@@ -316,11 +317,25 @@ TEST(SessionStopContractTests, BrowserStreamStopRespondsBeforeOwnedAppTerminate)
   ASSERT_NE(stop, std::string::npos);
   ASSERT_NE(respond, std::string::npos);
   ASSERT_NE(terminate, std::string::npos);
-  EXPECT_LT(prepare, stop);
+  // Token/helper first, respond, then prepare + terminate.
   EXPECT_LT(stop, respond);
-  EXPECT_LT(respond, terminate);
-  // stop_session must defer app kill on this path.
+  EXPECT_LT(respond, prepare);
+  EXPECT_LT(prepare, terminate);
+  // stop_session must defer app kill and media release on this path.
   EXPECT_NE(body.find("terminate_owned_app"), std::string::npos);
+  EXPECT_NE(body.find("release_media"), std::string::npos);
+}
+
+TEST(SessionStopContractTests, PortalReleaseDestroysCaptureOffHttpCriticalPath) {
+  // pw_thread_loop_stop can block forever; release must not run it synchronously
+  // on the caller without a timeout/detach budget.
+  const auto source = read_portal_grab_source_for_contract();
+  ASSERT_FALSE(source.empty());
+  const auto release = source.find("void release_global_capture()");
+  ASSERT_NE(release, std::string::npos);
+  const auto release_body = source.substr(release, 2200);
+  EXPECT_NE(release_body.find("async capture/session destroy"), std::string::npos);
+  EXPECT_NE(release_body.find("detach"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, DuplicateStopIsRejectedWhileStopIsInProgress) {

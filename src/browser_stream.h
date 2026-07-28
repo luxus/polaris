@@ -41,19 +41,22 @@ namespace browser_stream {
   };
 
   /**
-   * @brief Stop a Browser Stream session (helper + capture).
+   * @brief Stop a Browser Stream session (helper + optional capture/app).
    * @param terminate_owned_app When true (default), call proc::terminate if the
    *   session owned the nested app. HTTP handlers pass false and terminate after
    *   the response so :47990 cannot wedge on gamescope kill.
+   * @param release_media When true (default), run prepare_for_session_teardown.
+   *   HTTP handlers pass false, answer the client, then call prepare themselves
+   *   so a hung portal/PW dtor cannot empty the stop body.
    */
-  stop_session_result_t stop_session(std::string_view token, bool terminate_owned_app = true);
+  stop_session_result_t stop_session(std::string_view token, bool terminate_owned_app = true, bool release_media = true);
 
   /**
    * @brief Synchronously stop Browser Stream media capture before nested teardown.
    *
-   * SB-2 order: signal shutdown → release portal/PipeWire → bounded join (≤3s).
-   * Never blocks confighttp past the join budget. Must run before gamescope/labwc
-   * kill so PipeWire is not attached into a dying compositor.
+   * SB-2 order: signal shutdown → release portal/PipeWire (async-bounded) →
+   * bounded capture join (≤3s). Must run before gamescope/labwc kill so PipeWire
+   * is not attached into a dying compositor. Prefer calling after HTTP write.
    */
   void prepare_for_session_teardown();
   session_token_t issue_session_token(std::string_view remote_address, std::string_view app_uuid = {}, bool owns_app = false);
