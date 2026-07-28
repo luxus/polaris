@@ -1974,6 +1974,12 @@ namespace video {
   };
 
   static encoder_t *chosen_encoder;
+  static thread_local bool encoder_probe_in_progress = false;
+
+  bool encoder_probe_active() {
+    return encoder_probe_in_progress;
+  }
+
   int active_hevc_mode;
   int active_av1_mode;
   bool last_encoder_probe_supported_ref_frames_invalidation = false;
@@ -3346,6 +3352,24 @@ namespace video {
 
     if (dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get())) {
       result = disp.make_avcodec_encode_device(*pix_fmt);
+      // Portal SHM CUDA is NV12-only: prefer GPU 8-bit over software 10-bit.
+      // 8-bit NV12 when: SHM path cannot do 10-bit GPU frames, OR stream is non-HDR
+      // (client 10-bit SDR still sets dynamicRange=1 → portal DmaBuf was encoding p010 ~8ms).
+      if (result && colorspace.bit_depth == 10 &&
+          (result->prefer_8bit_encode || !colorspace_is_hdr(colorspace))) {
+        if (result->prefer_8bit_encode) {
+          BOOST_LOG(info) << "Using 8-bit NV12 CUDA upload for capture path that cannot do 10-bit GPU frames"sv;
+        } else {
+          BOOST_LOG(info) << "Using 8-bit NV12 encode for non-HDR stream (avoid p010 cost for 10-bit SDR)"sv;
+        }
+        colorspace.bit_depth = 8;
+        if (auto pix8 = select_encoder_output_pix_fmt(encoder, config, colorspace)) {
+          result = disp.make_avcodec_encode_device(*pix8);
+          if (result) {
+            result->prefer_8bit_encode = true;
+          }
+        }
+      }
     } else if (dynamic_cast<const encoder_platform_formats_nvenc *>(encoder.platform_formats.get())) {
       result = disp.make_nvenc_encode_device(*pix_fmt);
     }
@@ -3809,6 +3833,12 @@ namespace video {
   }
 
   bool validate_encoder(encoder_t &encoder, bool expect_failure) {
+    const auto previous_probe_state = encoder_probe_in_progress;
+    encoder_probe_in_progress = true;
+    auto probe_state_guard = util::fail_guard([previous_probe_state]() {
+      encoder_probe_in_progress = previous_probe_state;
+    });
+
     const auto output_name {display_device::map_output_name(config::video.output_name)};
     std::shared_ptr<platf::display_t> disp;
 
@@ -4422,7 +4452,18 @@ namespace video {
   util::Either<avcodec_buffer_t, int> cuda_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *encode_device) {
     avcodec_buffer_t hw_device_buf;
 
-    auto status = av_hwdevice_ctx_create(&hw_device_buf, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 1 /* AV_CUDA_USE_PRIMARY_CONTEXT */);
+    std::string cuda_device;
+    if (encode_device && encode_device->hardware_device_index &&
+        *encode_device->hardware_device_index >= 0) {
+      cuda_device = std::to_string(*encode_device->hardware_device_index);
+    }
+
+    auto status = av_hwdevice_ctx_create(
+      &hw_device_buf,
+      AV_HWDEVICE_TYPE_CUDA,
+      cuda_device.empty() ? nullptr : cuda_device.c_str(),
+      nullptr,
+      1 /* AV_CUDA_USE_PRIMARY_CONTEXT */);
     if (status < 0) {
       char string[AV_ERROR_MAX_STRING_SIZE];
       BOOST_LOG(error) << "Failed to create a CUDA device: "sv << av_make_error_string(string, AV_ERROR_MAX_STRING_SIZE, status);
