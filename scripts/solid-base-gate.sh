@@ -44,9 +44,22 @@ CSRF=""
 
 log() { printf '[solid-base-gate] %s\n' "$*" >&2; }
 
+# Per-request budget so stop/disconnect cannot hang the agent forever (SB-2 residual).
+# Override with GATE_CURL_MAX_TIME (seconds). Defaults: 20s general, 25s stop paths.
+GATE_CURL_MAX_TIME="${GATE_CURL_MAX_TIME:-20}"
+GATE_CURL_STOP_MAX_TIME="${GATE_CURL_STOP_MAX_TIME:-25}"
+
 curl_json() {
   local method="$1" path="$2" data="${3:-}"
-  local args=( -sk -c "$JAR" -b "$JAR" -X "$method" "${URL}${path}"
+  local max_time="$GATE_CURL_MAX_TIME"
+  # Stop/disconnect can wait on capture join; still hard-cap so the gate returns.
+  case "$path" in
+    */browser-stream/session/stop*|*/clients/disconnect*|*/session/stop*)
+      max_time="$GATE_CURL_STOP_MAX_TIME"
+      ;;
+  esac
+  local args=( -sk --max-time "$max_time" --connect-timeout 5
+    -c "$JAR" -b "$JAR" -X "$method" "${URL}${path}"
     -H "Content-Type: application/json" )
   if [[ -n "$CSRF" ]]; then
     args+=( -H "X-CSRF-TOKEN: $CSRF" )

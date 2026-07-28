@@ -58,6 +58,8 @@ Integrate by filling the reserved registry slots and implementing runtime/captur
 
 ## Relation to gamescope (lea / polaris-hdr-linux-patches)
 
-Today: **Mirror Desktop** + `capture=portal` + external gamescope session scripts.
+**Shipped on this branch:** `gamescope_stream` is available when `gamescope` is on PATH. `stream_runtime_gamescope` attaches to idle `gamescope-0` (or starts `polaris-hdr-idle` / spawns owned headless) and wraps app launches into that runtime. Capture stays portal/PipeWire-oriented; nested WSI remains a presentation sub-option (e.g. optional Steam Big Picture via `polaris-hdr-session`), not a top-level path.
 
-Target: flip `gamescope_stream` to `available` once `stream_runtime_gamescope` owns start/wait/stop (and optional attach). Capture stays portal-oriented; WSI remains a presentation sub-option, not a top-level path.
+**Host stack:** private portal D-Bus + gamescope portal units (luxusAi `polaris-hdr-session`) pin `NIX_XDG_DESKTOP_PORTAL_DIR` so ScreenCast is present on cold start. Patches pin follows polaris tip via `polaris-hdr-linux-patches`.
+
+**Still residual (not path-registry work):** clean stop under load (SB-2), idle preview without a live stream (SB-1), and multimode conf helpers that must preserve `browser_streaming` — see [`docs/research/stream-path-rewrite-followups.md`](research/stream-path-rewrite-followups.md).

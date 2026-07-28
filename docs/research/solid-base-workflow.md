@@ -82,7 +82,17 @@ SKIP_BROWSER_STREAM=1 ./scripts/solid-base-gate.sh
 
 # During an existing Moonlight session (preview-only stress)
 PREVIEW_ONLY=1 ./scripts/solid-base-gate.sh
+
+# Multi-mode: gamescope + labwc (headless_stream) + desktop_display, then restore gamescope
+RESTORE_MODE=gamescope_stream \
+  MODES='gamescope_stream headless_stream desktop_display' \
+  ./scripts/solid-base-multimode-gate.sh
+
+# Optional dongle (needs configured outputs)
+SKIP_DONGLE=0 MODES='... headless_dongle' ./scripts/solid-base-multimode-gate.sh
 ```
+
+Workflow: `solid-base-multimode` runs the multi-mode gate and restores `gamescope_stream`.
 
 Exit **0** only if every enabled check is `ok`. Last line is machine-parseable:
 
@@ -246,7 +256,8 @@ Or run the full orchestrator when several SBs are open:
 | `docs/research/solid-base-workflow.md` | this design |
 | `docs/research/stream-path-rewrite-followups.md` | live SB status |
 | `scripts/solid-base-smoke.sh` | lighter smoke (subset) |
-| `scripts/solid-base-gate.sh` | full agent gate (SB-6 implementation) |
+| `scripts/solid-base-gate.sh` | full agent gate (SB-6 implementation); curl `--max-time` on stop/disconnect |
+| `scripts/solid-base-multimode-gate.sh` | run gate under gamescope / labwc / desktop (+ optional dongle); re-asserts `browser_streaming` after mode helpers |
 | `scripts/pin-polaris-to-patches.sh` | rev+hash helper for patches flake |
 | `.grok/workflows/solid-base-stabilize.rhai` | orchestrator |
 | luxusAi `modules/nixos/polaris-hdr-session.nix` | SB-7 units |

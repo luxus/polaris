@@ -8,22 +8,18 @@ starts at `v1.0.0`.
 ## Unreleased
 
 ### Linux stream modes / private runtime foundation
-- Add first-class `linux_stream_mode` and `linux_private_runtime` config (Private Stream, Host Virtual Display, Mirror Desktop, GPU-native preference, reserved Gamescope Stream).
+- Add first-class `linux_stream_mode` and `linux_private_runtime` config (Private Stream, Host Virtual Display, Mirror Desktop, GPU-native preference, Gamescope Stream, Headless Dongle).
 - Keep legacy `headless_mode` / `linux_use_cage_compositor` / `linux_prefer_gpu_native_capture` as a compatibility mapping; UI and client-settings write both.
-- Centralize mode resolve/apply/labels in `stream_display_policy`; expose `gamescope_stream` as unavailable until a Gamescope backend lands.
-- Introduce `stream_runtime` interface with a labwc adapter so process session start does not hard-code cage forever.
-- Add `stream_path` registry (runtime × capture × topology) with reserved slots for gamescope ownership and community EVDI/Family Mode paths; honest `runtime_backend` for portal/host when labwc is idle.
+- Centralize mode resolve/apply/labels in `stream_display_policy`; path availability probes `gamescope` on PATH (and dongle outputs at apply).
+- Introduce `stream_runtime` interface with labwc and gamescope adapters so process session start does not hard-code cage forever.
+- Add `stream_path` registry (runtime × capture × topology) with reserved slots for community EVDI/Family Mode paths; honest `runtime_backend` for portal/host/gamescope/labwc.
 - Document the path plugin contract in `docs/stream-paths.md`.
-- Enable **Headless Dongle** path (`headless_dongle`): privacy/extended swap via kscreen-doctor (`display_topology`, `headless_swap_mode`).
-- Harden portal/PipeWire capture teardown (disconnect under loop lock) to avoid SEGV on service stop.
-- Enable **Gamescope Stream** ownership: attach to idle `gamescope-0` or spawn headless gamescope; wrap app launches into that runtime.
+- Enable **Headless Dongle** path (`headless_dongle`): privacy/extended swap via kscreen-doctor (`display_topology`, `headless_swap_mode`); DRM sysfs connector discovery + `/api/linux/display-outputs` auto-suggest.
+- Enable **Gamescope Stream** ownership: attach idle `gamescope-0` (start `polaris-hdr-idle` if needed) or spawn owned headless; wrap app launches into that runtime; never use `gamescope-1` for portal.
+- Harden portal/PipeWire capture: disconnect under loop lock; keep restore_token with invalidate+retry on SelectSources failure; wait for `AvailableCursorModes` ≠ 0; shared ownership so release cannot UAF negotiate/capture waiters.
+- Solid-base stop path: Moonlight `/cancel` responds before nested teardown; owner cancel ignores stale sessiontoken (case-insensitive UUID); Browser Stream signals shutdown, **releases portal/PipeWire**, then joins capture (bounded) **before** pidfd-killing gamescope/labwc; `terminate_impl` and WebUI disconnect share the same prepare path.
 - Dashboard preview tries labwc, gamescope-0/1, host Wayland (grim), then spectacle — works across stream paths.
 - Web UI: selectable path cards write full config (including dongle outputs and gamescope/portal capture).
-- Dongle path: DRM sysfs connector discovery + `/api/linux/display-outputs` with auto-suggest; apply auto-fills empty outputs.
-- Gamescope runtime: attach idle `gamescope-0` first (start `polaris-hdr-idle` if needed); never use `gamescope-1` for portal.
-- Solid-base stop path: Moonlight `/cancel` responds before nested teardown; owner cancel ignores stale sessiontoken (case-insensitive UUID); portal PipeWire disconnect under loop lock; gamescope path launches stock steam-appid detached via runtime wrap (mode-agnostic imports).
-- Portal restore token: keep enabled; on SelectSources failure invalidate the saved token and retry once without it, then save a fresh token. Wait briefly for `AvailableCursorModes` ≠ 0 before omitting cursor. Release portal/PipeWire capture before nested compositor kill (SB-2 SEGV).
-- SB-2 ordered stream stop (issue #2): Browser Stream joins video/audio capture and releases portal/PipeWire **before** pidfd-killing gamescope/labwc; `terminate_impl` and WebUI disconnect share the same prepare path so polaris no longer SEGV in `pipewire_capture::on_param_changed` when the client ends the stream.
 - SB-5 mode-neutral Steam apps (issue #5): migration v9 + load-time normalize unwrap `polaris-hdr-session` hardwires to `steam-appid` + detached `rungameid`; gamescope path applies attach X11 env (no host Wayland) via `stream_runtime::wrap_cmd` / process. Optional Steam Big Picture may keep nested WSI shell.
 
 ## v1.3.1 - 2026-07-12
