@@ -943,7 +943,7 @@ namespace platf {
         local_loopback_module = static_cast<std::uint32_t>(idx);
         BOOST_LOG(info) << "Linux audio isolation: local monitor loopback "
                         << capture_sink << ".monitor -> "sv << host
-                        << " (module="sv << local_loopback_module << ')'sv;
+                        << " (module="sv << local_loopback_module << ")"sv;
       }
 
       void unload_local_loopback() {
