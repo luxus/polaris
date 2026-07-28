@@ -95,10 +95,23 @@ fi
 
 rm -f "$JAR"
 login_body=$(printf '{"username":"%s","password":"%s"}' "$USER_NAME" "$PASS")
-login_resp=$(curl -sk -c "$JAR" -b "$JAR" -X POST "${URL}/api/login" \
-  -H "Content-Type: application/json" -d "$login_body" || true)
-log "login: ${login_resp:0:120}"
-CSRF=$(extract_csrf "$login_resp" || true)
+login_code=$(curl -sk -c "$JAR" -b "$JAR" -o /tmp/polaris-login-body.json -w '%{http_code}' \
+  -X POST "${URL}/api/login" \
+  -H "Content-Type: application/json" -d "$login_body" || echo 000)
+login_resp=$(cat /tmp/polaris-login-body.json 2>/dev/null || true)
+log "login http=$login_code body=${login_resp:0:120}"
+if [[ "$login_code" != "200" ]]; then
+  log "login failed — check POLARIS_USER / POLARIS_PASSWORD"
+  echo "solid-base-smoke: health=$health_ok preview=fail browser_start=fail browser_stop=fail stop_webui=fail session_idle=$session_idle_ok"
+  exit 2
+fi
+# CSRF is injected into SPA HTML meta (login body is often empty).
+CSRF=$(curl -sk -c "$JAR" -b "$JAR" "${URL}/" 2>/dev/null \
+  | python3 -c 'import sys,re; m=re.search(r"name=\"csrf-token\" content=\"([^\"]+)\"", sys.stdin.read()); print(m.group(1) if m else "")' \
+  || true)
+if [[ -z "$CSRF" ]]; then
+  CSRF=$(extract_csrf "$login_resp" || true)
+fi
 log "csrf present: $([[ -n "$CSRF" ]] && echo yes || echo no)"
 
 # --- preview ---
@@ -144,7 +157,7 @@ if apps:
 ' 2>/dev/null || true)
   fi
   if [[ -n "$app_uuid" ]]; then
-    start_body=$(printf '{"appUuid":"%s","streamProfile":"balanced"}' "$app_uuid")
+    start_body=$(printf '{"app_uuid":"%s","stream_profile":"balanced"}' "$app_uuid")
     start_resp=$(curl_json POST /api/browser-stream/session/start "$start_body" || true)
     log "browser start: ${start_resp:0:240}"
     token=$(printf '%s' "$start_resp" | python3 -c '
@@ -156,13 +169,13 @@ except Exception:
     raise SystemExit
 print(j.get("token") or j.get("session_token") or (j.get("session") or {}).get("token") or "")
 ' 2>/dev/null || true)
-    if [[ -n "$token" ]] || printf '%s' "$start_resp" | grep -qiE 'token|url|true'; then
+    if [[ -n "$token" ]]; then
       browser_start_ok=ok
     else
       browser_start_ok=fail
     fi
-    sleep 2
-    stop_body=$(printf '{"token":"%s"}' "${token:-}")
+    sleep 3
+    stop_body=$(printf '{"session_token":"%s"}' "${token:-}")
     stop_resp=$(curl_json POST /api/browser-stream/session/stop "$stop_body" || true)
     log "browser stop: ${stop_resp:0:200}"
     if printf '%s' "$stop_resp" | grep -qiE 'true|stopped'; then

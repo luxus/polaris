@@ -444,9 +444,71 @@ namespace browser_stream {
       return launch_session;
     }
 
+    // Private runtime for Browser Stream: labwc cage and/or gamescope (idle
+    // attach / gamescope_stream / portal host). Previously required cage only,
+    // which blocked smoke and WebUI tests on gamescope hosts (lea).
+    bool gamescope_socket_ready() {
+      const char *rt = std::getenv("XDG_RUNTIME_DIR");
+      if (!rt || !*rt) {
+        return false;
+      }
+      for (const char *sock : {"gamescope-0", "gamescope-1"}) {
+        std::string path = std::string(rt) + "/" + sock;
+        if (access(path.c_str(), F_OK) == 0) {
+          return true;
+        }
+      }
+      if (const char *gs = std::getenv("GAMESCOPE_WAYLAND_DISPLAY"); gs && *gs) {
+        std::string path = std::string(rt) + "/" + gs;
+        if (access(path.c_str(), F_OK) == 0) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    bool private_runtime_configured() {
+      if (config::video.linux_display.use_cage_compositor) {
+        return true;
+      }
+      const auto &mode = config::video.linux_display.stream_mode;
+      if (mode == "gamescope_stream" || mode == "headless_stream" || mode == "windowed_stream") {
+        return true;
+      }
+      // Portal capture on lea historically means external/idle gamescope.
+      if (config::video.capture == "portal" && gamescope_socket_ready()) {
+        return true;
+      }
+      return gamescope_socket_ready();
+    }
+
+    bool private_runtime_active() {
+      if (cage_display_router::is_running()) {
+        return true;
+      }
+      return gamescope_socket_ready();
+    }
+
+    std::string private_runtime_backend() {
+      if (cage_display_router::is_running()) {
+        return "labwc";
+      }
+      if (gamescope_socket_ready()) {
+        return "gamescope";
+      }
+      if (config::video.linux_display.use_cage_compositor) {
+        return "labwc";
+      }
+      if (config::video.linux_display.stream_mode == "gamescope_stream" ||
+          config::video.capture == "portal") {
+        return "gamescope";
+      }
+      return "";
+    }
+
     bool launch_isolated_app(const proc::ctx_t &app, std::string &error_out) {
-      if (!config::video.linux_display.use_cage_compositor) {
-        error_out = "Browser Stream app isolation requires the Linux private compositor runtime to be enabled.";
+      if (!private_runtime_configured()) {
+        error_out = "Browser Stream app isolation requires a Linux private runtime (labwc cage or gamescope).";
         return false;
       }
 
@@ -459,7 +521,8 @@ namespace browser_stream {
         }
       }
 
-      BOOST_LOG(info) << "Launching Browser Stream app session ["sv << app.name << ']';
+      BOOST_LOG(info) << "Launching Browser Stream app session ["sv << app.name
+                      << "] runtime=" << private_runtime_backend();
       auto launch_session = browser_launch_session();
       const auto err = proc::proc.execute(app, launch_session);
       if (err) {
@@ -469,7 +532,15 @@ namespace browser_stream {
         return false;
       }
 
-      if (!cage_display_router::is_running()) {
+      // Allow a short settle: nested gamescope / cage may take a moment.
+      for (int i = 0; i < 25; ++i) {
+        if (private_runtime_active()) {
+          return true;
+        }
+        std::this_thread::sleep_for(100ms);
+      }
+
+      if (!private_runtime_active()) {
         error_out = "Browser Stream started the application, but the isolated compositor did not remain active.";
         proc::proc.terminate(false, false);
         return false;
@@ -1569,21 +1640,34 @@ namespace browser_stream {
       {"app_name", proc::proc.get_last_run_app_name()},
       {"app_uuid", proc::proc.get_running_app_uuid()},
 #ifdef __linux__
-      {"isolated", cage_display_router::is_running()},
-      {"runtime", cage_display_router::is_running() ? "labwc" : ""},
+      {"isolated", private_runtime_active()},
+      {"runtime", private_runtime_backend()},
 #else
       {"isolated", false},
       {"runtime", ""},
 #endif
     };
 #ifdef __linux__
-    output["isolation"] = {
-      {"backend", "labwc"},
-      {"available", config::video.linux_display.use_cage_compositor},
-      {"active", cage_display_router::is_running()},
-      {"headless", cage_display_router::runtime_state().effective_headless},
-      {"wayland_socket", cage_display_router::get_wayland_socket()},
-    };
+    {
+      std::string wl_sock = cage_display_router::get_wayland_socket();
+      if (wl_sock.empty() && gamescope_socket_ready()) {
+        if (const char *gs = std::getenv("GAMESCOPE_WAYLAND_DISPLAY"); gs && *gs) {
+          wl_sock = gs;
+        }
+        else {
+          wl_sock = "gamescope-0";
+        }
+      }
+      output["isolation"] = {
+        {"backend", private_runtime_backend().empty() ? "labwc" : private_runtime_backend()},
+        {"available", private_runtime_configured()},
+        {"active", private_runtime_active()},
+        {"headless", cage_display_router::is_running() ?
+                       cage_display_router::runtime_state().effective_headless :
+                       gamescope_socket_ready()},
+        {"wayland_socket", wl_sock},
+      };
+    }
 #endif
     output["codecs"] = codec_json();
     output["profiles"] = stream_profiles_json();
@@ -1805,15 +1889,33 @@ namespace browser_stream {
       {"app_id", proc::proc.running()},
       {"app_name", proc::proc.get_last_run_app_name()},
       {"app_uuid", proc::proc.get_running_app_uuid()},
+#ifdef __linux__
+      {"isolated", private_runtime_active()},
+      {"runtime", private_runtime_backend()},
+#else
       {"isolated", true},
       {"runtime", "labwc"},
+#endif
     };
 #ifdef __linux__
-    output["isolation"] = {
-      {"backend", "labwc"},
-      {"headless", cage_display_router::runtime_state().effective_headless},
-      {"wayland_socket", cage_display_router::get_wayland_socket()},
-    };
+    {
+      std::string wl_sock = cage_display_router::get_wayland_socket();
+      if (wl_sock.empty() && gamescope_socket_ready()) {
+        if (const char *gs = std::getenv("GAMESCOPE_WAYLAND_DISPLAY"); gs && *gs) {
+          wl_sock = gs;
+        }
+        else {
+          wl_sock = "gamescope-0";
+        }
+      }
+      output["isolation"] = {
+        {"backend", private_runtime_backend().empty() ? "labwc" : private_runtime_backend()},
+        {"headless", cage_display_router::is_running() ?
+                       cage_display_router::runtime_state().effective_headless :
+                       gamescope_socket_ready()},
+        {"wayland_socket", wl_sock},
+      };
+    }
 #endif
     output["deferred"] = {"browser_gamepad", "wan_traversal", "hdr", "hevc", "av1"};
     return output;
