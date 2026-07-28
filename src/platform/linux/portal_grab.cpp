@@ -1273,10 +1273,65 @@ namespace portal {
         g_node_id = 0;
       }
 
-      if (!ensure_global_session_unlocked()) {
-        return nullptr;
+      // W3/W5 gamescopegrab: prefer session-graph Video/Source (media.name=gamescope)
+      // without private portal ScreenCast when linux_stream_mode=gamescope_stream.
+      // Falls through to portal if the node is missing (idle unit not exporting yet).
+      const auto &stream_mode = config::video.linux_display.stream_mode;
+      if ((!g_capture || !g_capture->running()) &&
+          (stream_mode == "gamescope_stream" || stream_mode.empty()) &&
+          config::video.linux_display.private_runtime == "gamescope") {
+        if (auto gs = pipewire_capture::find_gamescope_video_source()) {
+          const auto encoder_render_node = pipewire_capture::canonical_render_node(config::video.adapter_name);
+          std::vector<pipewire_capture::dmabuf_format_modifier_t> dmabuf_formats;
+          bool may_use_dmabuf = false;
+          if (encoder_render_node) {
+            const auto egl_formats = pipewire_capture::query_egl_dmabuf_import_formats(*encoder_render_node);
+            std::vector<std::uint64_t> mods;
+            for (const auto &f : egl_formats) {
+              for (auto m : f.modifiers) {
+                mods.push_back(m);
+              }
+            }
+            dmabuf_formats = pipewire_capture::task1_packed_dmabuf_formats(std::move(mods));
+            may_use_dmabuf = !dmabuf_formats.empty();
+          }
+          auto local = std::make_shared<pipewire_capture::capture_t>(pipewire_capture::capture_options_t {
+            .remote_fd = -1,
+            .node_id = gs->node_id,
+            .node_serial = gs->object_serial,
+            .requested_width = width,
+            .requested_height = height,
+            .capture_render_node = encoder_render_node,
+            .dmabuf_formats = std::move(dmabuf_formats),
+            .mem_type = mem_type,
+            .may_use_dmabuf = may_use_dmabuf,
+          });
+          if (local->start()) {
+            BOOST_LOG(info) << "portal: gamescopegrab local Video/Source node="sv << gs->node_id
+                            << " name="sv << gs->node_name << " (no private ScreenCast)"sv;
+            g_capture = local;
+            g_capture_requested_width = width;
+            g_capture_requested_height = height;
+            g_capture_mem_type = mem_type;
+            g_capture_adapter = requested_adapter;
+            g_node_id = gs->node_id;
+            capture = g_capture;
+            // Skip portal session setup; negotiation wait continues below.
+          }
+          else {
+            BOOST_LOG(info) << "portal: gamescopegrab start failed; falling back to portal ScreenCast"sv;
+          }
+        }
       }
 
+      // gamescopegrab already filled capture — skip private portal session.
+      if (capture && capture->running()) {
+        // fall through to negotiation wait outside locks
+      }
+      else if (!ensure_global_session_unlocked()) {
+        return nullptr;
+      }
+      else {
       const auto encoder_render_node = pipewire_capture::canonical_render_node(config::video.adapter_name);
       // Headless gamescope often omits SPA capture.device / render_node. If the
       // operator set adapter_name to a render node (same GPU as NVENC), assume it.
@@ -1378,6 +1433,7 @@ namespace portal {
       g_capture_adapter = requested_adapter;
       g_capture = new_capture;
       capture = g_capture;
+      }  // portal ScreenCast path
     }
 
     // The capture transport determines whether the encoder factory must use

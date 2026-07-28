@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cinttypes>
 #include <cstdlib>
 #include <cerrno>
 #include <cctype>
@@ -24,8 +25,13 @@
 #include <spa/param/video/format.h>
 #include <spa/param/video/raw.h>
 #include <spa/param/video/type-info.h>
+#include <spa/utils/defs.h>
 #include <spa/utils/result.h>
 #include <unistd.h>
+
+#ifndef SPA_ID_INVALID
+  #define SPA_ID_INVALID ((uint32_t) 0xffffffff)
+#endif
 
 #include "src/logging.h"
 
@@ -467,10 +473,10 @@ namespace pipewire_capture {
       frame_cv_.notify_all();
     }
 
-    // Stop the loop first, then disconnect/destroy the stream under the loop
-    // lock so state_changed cannot run against a freed capture_t (SEGV on unit stop).
+    // Sunshine-style teardown: hold the loop lock while disconnecting the stream
+    // and core, then stop/destroy the loop. Avoids racing callbacks and matches
+    // LizardByte/Sunshine pipewire.cpp (W1 micro-adopt).
     if (loop_) {
-      pw_thread_loop_stop(loop_);
       pw_thread_loop_lock(loop_);
     }
     if (stream_) {
@@ -478,9 +484,6 @@ namespace pipewire_capture {
       pw_stream_disconnect(stream_);
       pw_stream_destroy(stream_);
       stream_ = nullptr;
-    }
-    if (loop_) {
-      pw_thread_loop_unlock(loop_);
     }
     if (core_) {
       pw_core_disconnect(core_);
@@ -490,18 +493,25 @@ namespace pipewire_capture {
       pw_context_destroy(context_);
       context_ = nullptr;
     }
-    if (loop_) {
-      pw_thread_loop_destroy(loop_);
-      loop_ = nullptr;
-    }
     if (remote_fd_ >= 0) {
       close(remote_fd_);
       remote_fd_ = -1;
     }
+    if (loop_) {
+      pw_thread_loop_unlock(loop_);
+      pw_thread_loop_stop(loop_);
+      pw_thread_loop_destroy(loop_);
+      loop_ = nullptr;
+    }
   }
 
   bool capture_t::start() {
-    if (remote_fd_ < 0 || options_.node_id == 0) {
+    // Portal remote: remote_fd >= 0 + node_id. Local graph (gamescopegrab / kwin):
+    // remote_fd < 0 + node_id and/or valid object serial.
+    const bool has_node = options_.node_id != 0;
+    const bool has_serial = options_.node_serial != 0 &&
+                            (options_.node_serial & SPA_ID_INVALID) != SPA_ID_INVALID;
+    if (!has_node && !has_serial) {
       return false;
     }
 
@@ -519,11 +529,21 @@ namespace pipewire_capture {
       return false;
     }
 
-    const auto core_fd = std::exchange(remote_fd_, -1);
-    core_ = pw_context_connect_fd(context_, core_fd, nullptr, 0);
-    if (!core_) {
-      BOOST_LOG(warning) << "portal: Failed to connect PipeWire remote fd"sv;
-      return false;
+    if (remote_fd_ >= 0) {
+      const auto core_fd = std::exchange(remote_fd_, -1);
+      core_ = pw_context_connect_fd(context_, core_fd, nullptr, 0);
+      if (!core_) {
+        BOOST_LOG(warning) << "portal: Failed to connect PipeWire remote fd"sv;
+        return false;
+      }
+    }
+    else {
+      // Default user session graph (direct node capture without portal remote).
+      core_ = pw_context_connect(context_, nullptr, 0);
+      if (!core_) {
+        BOOST_LOG(warning) << "portal: Failed to connect default PipeWire core"sv;
+        return false;
+      }
     }
 
     auto *props = pw_properties_new(
@@ -532,10 +552,6 @@ namespace pipewire_capture {
       PW_KEY_MEDIA_ROLE, "Screen",
       nullptr);
 
-    // The portal-returned node ID belongs to this private PipeWire remote and is
-    // the authoritative target. Keep the object serial for diagnostics and for a
-    // future registry-based lookup, but do not make startup depend on an
-    // asynchronous serial target that cannot be safely retried from callbacks.
     stream_ = pw_stream_new(core_, "polaris-portal-capture", props);
     if (!stream_) {
       BOOST_LOG(warning) << "portal: Failed to create PipeWire stream"sv;
@@ -596,14 +612,46 @@ namespace pipewire_capture {
       SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&default_size, &min_size, &max_size)));
     params.push_back(memptr_fmt_param);
 
-    const auto target_id = options_.node_id;
-    if (pw_stream_connect(stream_,
-          PW_DIRECTION_INPUT,
-          target_id,
-          static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
-          params.data(), params.size()) < 0) {
-      BOOST_LOG(warning) << "portal: Failed to connect PipeWire stream to node "sv << options_.node_id;
-      return false;
+    // Sunshine connect strategy: prefer object serial (target.object) then node id.
+#ifndef PW_KEY_TARGET_OBJECT
+  #define PW_KEY_TARGET_OBJECT "target.object"
+#endif
+    int connect_rc = -1;
+    if (has_serial) {
+      pw_properties_setf(pw_stream_get_properties(stream_), PW_KEY_TARGET_OBJECT, "%" PRIu64, options_.node_serial);
+      connect_rc = pw_stream_connect(
+        stream_,
+        PW_DIRECTION_INPUT,
+        PW_ID_ANY,
+        static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
+        params.data(),
+        params.size()
+      );
+      if (connect_rc < 0) {
+        pw_properties_set(pw_stream_get_properties(stream_), PW_KEY_TARGET_OBJECT, nullptr);
+        BOOST_LOG(debug) << "portal: serial connect failed; falling back to node id"sv;
+      }
+      else {
+        BOOST_LOG(info) << "portal: PipeWire connect via object serial="sv << options_.node_serial;
+      }
+    }
+    if (connect_rc < 0) {
+      if (!has_node) {
+        BOOST_LOG(warning) << "portal: Failed to connect PipeWire stream (no node id after serial fail)"sv;
+        return false;
+      }
+      connect_rc = pw_stream_connect(
+        stream_,
+        PW_DIRECTION_INPUT,
+        options_.node_id,
+        static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
+        params.data(),
+        params.size()
+      );
+      if (connect_rc < 0) {
+        BOOST_LOG(warning) << "portal: Failed to connect PipeWire stream to node "sv << options_.node_id;
+        return false;
+      }
     }
 
     {
@@ -1052,6 +1100,104 @@ namespace pipewire_capture {
       return;
     }
     pw_stream_queue_buffer(stream_, buffer);
+  }
+
+  namespace {
+    struct gamescope_find_t {
+      pw_main_loop *loop = nullptr;
+      std::optional<video_source_t> found;
+    };
+
+    void on_registry_global(void *data, uint32_t id, uint32_t /*permissions*/, const char *type, uint32_t /*version*/, const struct spa_dict *props) {
+      auto *ctx = static_cast<gamescope_find_t *>(data);
+      if (!ctx || !type || !props || std::strcmp(type, PW_TYPE_INTERFACE_Node) != 0) {
+        return;
+      }
+      if (ctx->found) {
+        return;
+      }
+      const char *media_class = spa_dict_lookup(props, "media.class");
+      const char *media_name = spa_dict_lookup(props, "media.name");
+      const char *node_name = spa_dict_lookup(props, "node.name");
+      const char *app_name = spa_dict_lookup(props, "application.name");
+      const bool is_video_source = media_class && std::strcmp(media_class, "Video/Source") == 0;
+      auto has_gamescope = [](const char *s) {
+        return s && std::strstr(s, "gamescope") != nullptr;
+      };
+      // Prefer Video/Source named gamescope; allow any Video/Source with gamescope in name.
+      if (!is_video_source || (!has_gamescope(media_name) && !has_gamescope(node_name) && !has_gamescope(app_name))) {
+        return;
+      }
+      video_source_t src;
+      src.node_id = id;
+      if (const char *serial = spa_dict_lookup(props, "object.serial")) {
+        src.object_serial = std::strtoull(serial, nullptr, 10);
+      }
+      src.node_name = node_name ? node_name : (media_name ? media_name : "gamescope");
+      ctx->found = src;
+      if (ctx->loop) {
+        pw_main_loop_quit(ctx->loop);
+      }
+    }
+
+    const pw_registry_events registry_events = {
+      .version = PW_VERSION_REGISTRY_EVENTS,
+      .global = on_registry_global,
+    };
+  }  // namespace
+
+  std::optional<video_source_t> find_gamescope_video_source() {
+    // Operator override for smoke without registry walk.
+    if (const char *env = std::getenv("POLARIS_GAMESCOPE_PW_NODE"); env && *env) {
+      char *end = nullptr;
+      const auto id = std::strtoul(env, &end, 10);
+      if (end != env && id > 0 && id < 0xffffffffu) {
+        video_source_t src;
+        src.node_id = static_cast<std::uint32_t>(id);
+        src.node_name = "env:POLARIS_GAMESCOPE_PW_NODE";
+        return src;
+      }
+    }
+
+    init_pipewire_once();
+    gamescope_find_t ctx;
+    ctx.loop = pw_main_loop_new(nullptr);
+    if (!ctx.loop) {
+      return std::nullopt;
+    }
+    auto *context = pw_context_new(pw_main_loop_get_loop(ctx.loop), nullptr, 0);
+    if (!context) {
+      pw_main_loop_destroy(ctx.loop);
+      return std::nullopt;
+    }
+    auto *core = pw_context_connect(context, nullptr, 0);
+    if (!core) {
+      pw_context_destroy(context);
+      pw_main_loop_destroy(ctx.loop);
+      return std::nullopt;
+    }
+    auto *registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
+    spa_hook registry_listener {};
+    pw_registry_add_listener(registry, &registry_listener, &registry_events, &ctx);
+
+    auto *loop = pw_main_loop_get_loop(ctx.loop);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+    while (!ctx.found && std::chrono::steady_clock::now() < deadline) {
+      pw_loop_iterate(loop, 50);
+    }
+
+    spa_hook_remove(&registry_listener);
+    pw_proxy_destroy(reinterpret_cast<pw_proxy *>(registry));
+    pw_core_disconnect(core);
+    pw_context_destroy(context);
+    pw_main_loop_destroy(ctx.loop);
+
+    if (ctx.found) {
+      BOOST_LOG(info) << "pipewire: found gamescope Video/Source node="sv << ctx.found->node_id
+                      << " serial="sv << ctx.found->object_serial
+                      << " name="sv << ctx.found->node_name;
+    }
+    return ctx.found;
   }
 
 #if defined(POLARIS_TESTS)

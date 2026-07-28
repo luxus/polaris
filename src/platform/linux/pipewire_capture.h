@@ -141,6 +141,19 @@ namespace pipewire_capture {
   platf::frame_metadata_t dmabuf_frame_metadata(std::string render_node);
   bool frame_requires_cpu_copy(const platf::frame_metadata_t &metadata);
 
+  /**
+   * @brief Locate gamescope's exported Video/Source on the default PipeWire graph.
+   *
+   * gamescope publishes media.name=gamescope (node.name often .gamescope-wrapped).
+   * Used for gamescopegrab (direct capture without private portal ScreenCast).
+   */
+  struct video_source_t {
+    std::uint32_t node_id = 0;
+    std::uint64_t object_serial = 0;
+    std::string node_name;
+  };
+  std::optional<video_source_t> find_gamescope_video_source();
+
   class capture_t: public std::enable_shared_from_this<capture_t> {
   public:
     explicit capture_t(capture_options_t options);
