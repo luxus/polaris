@@ -111,14 +111,16 @@ Documented in [`docs/research/stream-path-rewrite-followups.md`](stream-path-rew
 
 | Item | Status | Notes |
 |------|--------|--------|
-| **SB-2 clean stop / RST** | **Open** | Ordered stop + portal release + bounded join landed in code; on lea under load, gate still saw `stream_stop`/`webui_stop` hang → 10s force shutdown → polaris **SIGTRAP** core and **gamescope SEGV** in some runs. HTTPS can wedge until restart. **Do not claim SB-2 closed.** |
-| **SB-3 WebUI disconnect** | Blocked by SB-2 | Same stop path; residual is not a separate disconnect API bug once stop no longer kills the host process. |
-| **SB-1 idle preview** | Residual | Idle API/gamescopectl often empty/black; **mid-stream** `stream_preview=ok` when a real session is up. |
-| **SB-4 cancel 470** | Code landed | Owner/stale-token fix present; re-prove with real Moonlight `/cancel` on tip. |
-| **Dongle polish** | Partial | Path available with outputs + auto_manage; connector auto-detect + API suggest present. E2E multimode library launch on dongle and conf-template polish remain follow-ups. |
-| **Multimode tooling** | Partial | Mode helpers that rewrite conf must preserve `browser_streaming` (gate re-asserts; host helper merge is still host-side hygiene). |
+| **SB-2 clean stop / RST** | **User-proven (`ad0ed6b`+)** | `session_media` ordered stop; lea journal 2026-07-28: portal destroy ~ms, client + host close, polaris stays active. Optional full agent gate for CI. |
+| **SB-3 WebUI disconnect** | **User-proven** | Same stop path as session_media host terminate. |
+| **SB-1 preview** | **Mid-stream proven** | 4K portal DMA-BUF + NVENC; idle-only residual optional. |
+| **SB-4 cancel 470** | Code landed | Owner path observed in journal; optional full matrix. |
+| **gamescopegrab** | **GO-WITH-PORTAL-FALLBACK** | Prefer session-graph Video/Source; private portal fallback. Idle units kept. |
+| **kwingrab** | Deferred | Feasible on KDE; not this wave. |
+| **Dongle polish** | Partial | Portal default after topology; auto-detect present. |
+| **Multimode tooling** | Partial | Gate re-asserts `browser_streaming` after mode helpers. |
 
-**Ship posture:** prefer landing this foundation even with residual SB-2 SEGV risk documented here—block only on unbuildable branch, secrets, or broken history. Follow-up work should re-run solid-base-gate + Moonlight cancel after deploy and close SB-2 only when stop is green without cores.
+**Ship posture:** foundation with known residuals. Idle gamescope + private portal remain supported; Sunshine micro-adopts and gamescopegrab are incremental—not a stack flip.
 
 ## Related
 
