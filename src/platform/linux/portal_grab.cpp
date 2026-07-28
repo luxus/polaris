@@ -534,14 +534,33 @@ namespace portal {
     std::atomic<bool> negotiated{false};
 
     ~pw_capture_t() {
-      if (pw_loop) pw_thread_loop_stop(pw_loop);
-      if (pw_stream_handle) pw_stream_destroy(pw_stream_handle);
-      if (pw_loop) pw_thread_loop_destroy(pw_loop);
+      running = false;
+      // Stop the loop first, then disconnect/destroy the stream under the loop
+      // lock so state_changed/process cannot run against a freed capture_t
+      // (SEGV on stream stop / unit restart — SB-2).
+      if (pw_loop) {
+        pw_thread_loop_stop(pw_loop);
+        pw_thread_loop_lock(pw_loop);
+      }
+      if (pw_stream_handle) {
+        pw_stream_set_active(pw_stream_handle, false);
+        pw_stream_disconnect(pw_stream_handle);
+        pw_stream_destroy(pw_stream_handle);
+        pw_stream_handle = nullptr;
+      }
+      if (pw_loop) {
+        pw_thread_loop_unlock(pw_loop);
+        pw_thread_loop_destroy(pw_loop);
+        pw_loop = nullptr;
+      }
     }
   };
 
   static void on_process(void *userdata) {
     auto *cap = static_cast<pw_capture_t *>(userdata);
+    if (!cap || !cap->pw_stream_handle) {
+      return;
+    }
     struct pw_buffer *b = pw_stream_dequeue_buffer(cap->pw_stream_handle);
     if (!b) return;
 
@@ -596,6 +615,10 @@ namespace portal {
 
   static void on_state_changed(void *userdata, enum pw_stream_state old,
     enum pw_stream_state state, const char *errmsg) {
+    auto *cap = static_cast<pw_capture_t *>(userdata);
+    if (!cap) {
+      return;
+    }
     BOOST_LOG(info) << "portal: PipeWire state: "sv
                     << pw_stream_state_as_string(old) << " -> "sv
                     << pw_stream_state_as_string(state);

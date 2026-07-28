@@ -5430,7 +5430,12 @@ namespace nvhttp {
     print_req<PolarisHTTPS>(request);
 
     pt::ptree tree;
+    bool response_written = false;
     auto g = util::fail_guard([&]() {
+      // SB-2: when we already answered Moonlight before nested teardown, skip.
+      if (response_written) {
+        return;
+      }
       std::ostringstream data;
 
       pt::write_xml(data, tree);
@@ -5458,13 +5463,30 @@ namespace nvhttp {
     }
 
     const auto session_token = get_arg(args, "sessiontoken", "");
-    const auto shutdown = proc::proc.request_session_shutdown(
-      named_cert_p->uuid,
-      session_token,
-      true,
-      !session_token.empty()
-    );
-    switch (shutdown.snapshot.outcome) {
+    // Paired cert UUID is the owner identity. Never require sessiontoken for the
+    // owner — Artemis/Moonlight often send a stale token and map any cancel
+    // failure to "started by another device".
+    const bool is_owner = proc::proc.is_session_owner(named_cert_p->uuid);
+
+    // Preflight without teardown so we can answer the client before nested
+    // gamescope undo (which can SEGV polaris mid-cancel and leave Moonlight
+    // thinking quit failed as "another device").
+    auto preflight = proc::proc.get_session_stop_snapshot(named_cert_p->uuid, true);
+    auto outcome = preflight.outcome;
+    if (is_owner &&
+        (outcome == proc::session_stop_outcome_t::other_owner ||
+         outcome == proc::session_stop_outcome_t::token_mismatch ||
+         outcome == proc::session_stop_outcome_t::uncontrolled_stream)) {
+      // Owner cert always wins over stale token / role race after disconnect.
+      if (preflight.had_running_app || preflight.active_sessions > 0) {
+        outcome = proc::session_stop_outcome_t::allowed;
+      }
+      else {
+        outcome = proc::session_stop_outcome_t::no_active_session;
+      }
+    }
+
+    switch (outcome) {
       case proc::session_stop_outcome_t::allowed:
       case proc::session_stop_outcome_t::no_active_session:
         tree.put("root.cancel", 1);
@@ -5495,6 +5517,30 @@ namespace nvhttp {
         break;
     }
 
+    BOOST_LOG(info) << "cancel: client=["sv << named_cert_p->name
+                    << "] owner="sv << (is_owner ? "yes" : "no")
+                    << " preflight_outcome="sv << static_cast<int>(outcome)
+                    << " token_sent="sv << !session_token.empty()
+                    << " had_app="sv << preflight.had_running_app;
+
+    // Answer Moonlight first — nested WSI undo can SEGV the host process.
+    {
+      std::ostringstream data;
+      pt::write_xml(data, tree);
+      response->write(data.str());
+      response->close_connection_after_response = true;
+      response_written = true;
+    }
+
+    if (outcome == proc::session_stop_outcome_t::allowed) {
+      // Require no token for owner; empty token for non-owner still fails if not owned.
+      static_cast<void>(proc::proc.request_session_shutdown(
+        named_cert_p->uuid,
+        session_token,
+        true,
+        !session_token.empty() && !is_owner
+      ));
+    }
   }
 
   void appasset(resp_https_t response, req_https_t request) {

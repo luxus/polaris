@@ -8,12 +8,18 @@
 
 | SB | Status | Notes |
 |----|--------|--------|
-| #1 Preview | **Code landed** | `gamescopectl` first (grim unsupported on gamescope); reject empty PNG; X11 import from `polaris-hdr.env` DISPLAY; last-frame cache at `$XDG_RUNTIME_DIR/polaris-last-preview.png`. Idle headless may still need live content or cache from prior stream. |
-| #2 Clean stop / RST | **Code landed** | `rtsp clear`/`terminate_sessions` uses `graceful_stop` + short flush before `join` (control terminate before socket teardown). Needs post-deploy Moonlight/browser smoke. |
-| #3 WebUI disconnect | **Code landed** | Force `request_session_shutdown` + terminate; needs smoke with password |
-| #4 Cancel 470 | **Code landed** | Live RTSP controller can stop if owner uuid drifted; unit test added |
-| #5 Mode-agnostic apps | **Inject mode-aware** | luxusAi: wire library games only for gamescope_stream / portal-without-cage; else unwrap to steam-appid. Polaris import stays steam-appid neutral. |
-| #6 Smoke harness | **Script landed** | `scripts/solid-base-smoke.sh` + `solid-base-gate.sh` — browser stream preferred; needs `POLARIS_PASSWORD` |
+| #1 Preview | **Closed** | Live Web UI + gate mid-stream; last-frame / gamescopectl. |
+| #2 Clean stop / RST | **Code hardened** | Graceful stop + flush; `/cancel` answers before nested teardown; portal PW disconnect under loop lock. Residual host SEGV risk only if nested undo still crashes *after* HTTP 200. Needs post-deploy Moonlight smoke. |
+| #3 WebUI disconnect | **Closed** | Force disconnect verified. |
+| #4 Cancel 470 | **Closed+** | Controller role; owner case-insensitive; owner skips stale sessiontoken; cancel preflight + respond-first. |
+| #5 Mode-agnostic apps | **Code landed** | Polaris gamescope runtime wraps detached steam-appid launches (no hdr-session hardwire). luxusAi inject: explicit non-gamescope modes stay neutral; legacy portal+no-cage only when mode unset. |
+| #6 Smoke harness | **Closed** | `solid-base-gate.sh` green + workflow docs. |
+| #7 Portal units | **Closed** | Unit-owned stack; cold-boot cursor-mode omit + rebind. |
+
+**Gate line (pre this commit, lea):**  
+`solid-base-gate: units=ok screencast=ok preview=ok stream_start=ok stream_preview=ok stream_stop=ok webui_stop=ok dual_socket=ok encode=ok` → **pass** (blockers: none)
+
+**Pin note:** after deploying this tip, drop or refresh `polaris-hdr-linux-patches` `fix-cancel-owner-token.patch` (now upstreamed).
 
 **Test preference (approved):** Browser Stream API for agent smoke.
 
@@ -124,10 +130,13 @@ All Steam imports: `polaris-hdr-session start|wait`. Mode switches need manual a
 
 ## 4. Rewrite deliverables still open
 
-- [ ] SB-1…SB-7 closed / verified
-- [ ] Owned `gamescope_stream` start/wait/stop + attach-idle
+- [x] SB-1,3,4,6,7 closed (2026-07-28)
+- [x] SB-2 cancel-before-teardown + portal PW lock teardown + graceful stop (2026-07-28)
+- [x] SB-5 gamescope wrap detached steam-appid + inject mode-explicit (2026-07-28)
+- [ ] SB-2 post-deploy Moonlight connect/disconnect without client-visible fail (host SEGV after 200 still possible)
+- [ ] SB-5 E2E labwc / dongle / gamescope mode switch with stock apps.json
+- [ ] Owned `gamescope_stream` start/wait/stop + attach-idle polish
 - [ ] Dongle auto-detect polish
-- [ ] E2E labwc / gamescope / dongle
 - [ ] Optional: #152 PR comment
 
 ---

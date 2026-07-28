@@ -5441,49 +5441,111 @@ namespace proc {
       input::preallocate_gamepad();
     }
 
-    // Start cage with the first detached command as its primary client.
-    // Cage is a kiosk compositor — it only displays its main process fullscreen.
+    // Start private runtime, then launch detached app commands into it.
+    // Labwc: first detached is the kiosk primary client.
+    // Gamescope (SB-5): attach/owned start ignores primary game_cmd when idle
+    // gamescope-0 is already present — always launch steam-appid detached via
+    // wrap_cmd so imports stay mode-neutral (no polaris-hdr-session hardwire).
+    const bool gamescope_private_runtime =
+      private_runtime &&
+      private_runtime->backend_id() == stream_display_policy::k_runtime_gamescope;
+
     if (use_cage_compositor_for_session && !_app.detached.empty()) {
-      std::string game_cmd = cage_runtime_command(_app.detached[0]);
-      if (!start_cage_with_runtime_fallback(game_cmd)) {
-        BOOST_LOG(error) << "session_manager: Failed to start cage with game"sv;
-        confighttp::emit_session_event("error", "Failed to start cage compositor");
-        return 503;
-      } else {
+      if (gamescope_private_runtime) {
+        // Attach/start gamescope without a primary child; launch all detached into it.
+        if (!start_cage_with_runtime_fallback("")) {
+          BOOST_LOG(error) << "session_manager: Failed to start gamescope runtime for detached app"sv;
+          confighttp::emit_session_event("error", "Failed to start gamescope runtime");
+          return 503;
+        }
         _session_used_cage_compositor = true;
         cage_started_with_detached_client = true;
         confighttp::set_session_state(confighttp::session_state_e::game_launching);
         confighttp::emit_session_event("game_launching", "Launching " + _app.name);
-      }
-      // Launch remaining detached commands (if any) with cage's WAYLAND_DISPLAY
-      for (size_t i = 1; i < _app.detached.size(); ++i) {
-        auto cmd = cage_runtime_command(_app.detached[i]);
-        auto cmd_env = _env;
-        if (!allow_cage_mangohud) {
-          strip_mangohud_env(cmd_env);
-        }
-        apply_gamepad_sdl_env(cmd_env);
-        auto cage_socket = cage_display_router::get_wayland_socket();
-        if (!cage_socket.empty()) {
-          cmd_env["WAYLAND_DISPLAY"] = cage_socket;
-          cmd_env["AT_SPI_BUS_ADDRESS"] = "";
-          auto cage_display = cage_display_router::get_x11_display();
-          if (!cage_display.empty()) {
-            cmd_env["DISPLAY"] = cage_display;
-          } else {
-            cmd_env.erase("DISPLAY");
+
+        for (size_t i = 0; i < _app.detached.size(); ++i) {
+          auto cmd = private_runtime->wrap_cmd(cage_runtime_command(_app.detached[i]));
+          auto cmd_env = _env;
+          if (!allow_cage_mangohud) {
+            strip_mangohud_env(cmd_env);
+          }
+          apply_gamepad_sdl_env(cmd_env);
+          auto cage_socket = private_runtime->wayland_socket();
+          if (cage_socket.empty()) {
+            cage_socket = cage_display_router::get_wayland_socket();
+          }
+          if (!cage_socket.empty()) {
+            cmd_env["WAYLAND_DISPLAY"] = cage_socket;
+            cmd_env["GAMESCOPE_WAYLAND_DISPLAY"] = cage_socket;
+            cmd_env["AT_SPI_BUS_ADDRESS"] = "";
+            auto cage_display = private_runtime->x11_display();
+            if (cage_display.empty()) {
+              cage_display = cage_display_router::get_x11_display();
+            }
+            if (!cage_display.empty()) {
+              cmd_env["DISPLAY"] = cage_display;
+            }
+            else {
+              cmd_env.erase("DISPLAY");
+            }
+          }
+          const auto launch_cmd = command_with_gamepad_isolation(cmd);
+          boost::filesystem::path working_dir = _app.working_dir.empty() ?
+                                                  find_working_directory(_app.detached[i], cmd_env) :
+                                                  boost::filesystem::path(_app.working_dir);
+          BOOST_LOG(info) << "gamescope_runtime: spawning detached ["sv << launch_cmd
+                          << "] in ["sv << working_dir << ']';
+          auto child = platf::run_command(_app.elevated, true, launch_cmd, working_dir, cmd_env, _pipe.get(), ec, &_process_group);
+          if (ec) {
+            BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
+          }
+          else {
+            child.detach();
           }
         }
-        const auto launch_cmd = command_with_gamepad_isolation(cmd);
-        boost::filesystem::path working_dir = _app.working_dir.empty() ?
-                                                find_working_directory(cmd, cmd_env) :
-                                                boost::filesystem::path(_app.working_dir);
-        BOOST_LOG(info) << "Spawning ["sv << launch_cmd << "] in ["sv << working_dir << ']';
-        auto child = platf::run_command(_app.elevated, true, launch_cmd, working_dir, cmd_env, _pipe.get(), ec, &_process_group);
-        if (ec) {
-          BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
+      }
+      else {
+        std::string game_cmd = cage_runtime_command(_app.detached[0]);
+        if (!start_cage_with_runtime_fallback(game_cmd)) {
+          BOOST_LOG(error) << "session_manager: Failed to start cage with game"sv;
+          confighttp::emit_session_event("error", "Failed to start cage compositor");
+          return 503;
         } else {
-          child.detach();
+          _session_used_cage_compositor = true;
+          cage_started_with_detached_client = true;
+          confighttp::set_session_state(confighttp::session_state_e::game_launching);
+          confighttp::emit_session_event("game_launching", "Launching " + _app.name);
+        }
+        // Launch remaining detached commands (if any) with cage's WAYLAND_DISPLAY
+        for (size_t i = 1; i < _app.detached.size(); ++i) {
+          auto cmd = cage_runtime_command(_app.detached[i]);
+          auto cmd_env = _env;
+          if (!allow_cage_mangohud) {
+            strip_mangohud_env(cmd_env);
+          }
+          apply_gamepad_sdl_env(cmd_env);
+          auto cage_socket = cage_display_router::get_wayland_socket();
+          if (!cage_socket.empty()) {
+            cmd_env["WAYLAND_DISPLAY"] = cage_socket;
+            cmd_env["AT_SPI_BUS_ADDRESS"] = "";
+            auto cage_display = cage_display_router::get_x11_display();
+            if (!cage_display.empty()) {
+              cmd_env["DISPLAY"] = cage_display;
+            } else {
+              cmd_env.erase("DISPLAY");
+            }
+          }
+          const auto launch_cmd = command_with_gamepad_isolation(cmd);
+          boost::filesystem::path working_dir = _app.working_dir.empty() ?
+                                                  find_working_directory(cmd, cmd_env) :
+                                                  boost::filesystem::path(_app.working_dir);
+          BOOST_LOG(info) << "Spawning ["sv << launch_cmd << "] in ["sv << working_dir << ']';
+          auto child = platf::run_command(_app.elevated, true, launch_cmd, working_dir, cmd_env, _pipe.get(), ec, &_process_group);
+          if (ec) {
+            BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
+          } else {
+            child.detach();
+          }
         }
       }
     } else if (use_cage_compositor_for_session) {
@@ -6281,7 +6343,10 @@ namespace proc {
   bool proc_t::is_session_owner(const std::string &unique_id) {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
-    return !_launch_session || _launch_session->unique_id.empty() || _launch_session->unique_id == unique_id;
+    // Case-insensitive: cert UUID formatting can differ across client stacks.
+    return !_launch_session ||
+           _launch_session->unique_id.empty() ||
+           boost::iequals(_launch_session->unique_id, unique_id);
   }
 
   bool proc_t::session_uses_virtual_display() {
@@ -6406,14 +6471,18 @@ namespace proc {
       _launch_session &&
       !unique_id.empty() &&
       !_launch_session->unique_id.empty() &&
-      _launch_session->unique_id == unique_id;
+      boost::iequals(_launch_session->unique_id, unique_id);
     snapshot.game = _app_name;
-    const bool token_matches = session_stop_token_matches(
-      require_exact_token,
-      expected_token,
-      snapshot.session_token,
-      rtsp_snapshot.requester_session_tokens
-    );
+    // Owner cert identity is enough; do not require sessiontoken for stop/cancel.
+    // (Clients often send a stale token after disconnect and get a false 470.)
+    const bool token_matches =
+      snapshot.owned_by_client ||
+      session_stop_token_matches(
+        require_exact_token,
+        expected_token,
+        snapshot.session_token,
+        rtsp_snapshot.requester_session_tokens
+      );
     snapshot.outcome = evaluate_session_stop_request(
       can_launch,
       snapshot.had_running_app,

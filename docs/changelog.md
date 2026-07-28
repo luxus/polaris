@@ -21,6 +21,7 @@ starts at `v1.0.0`.
 - Web UI: selectable path cards write full config (including dongle outputs and gamescope/portal capture).
 - Dongle path: DRM sysfs connector discovery + `/api/linux/display-outputs` with auto-suggest; apply auto-fills empty outputs.
 - Gamescope runtime: attach idle `gamescope-0` first (start `polaris-hdr-idle` if needed); never use `gamescope-1` for portal.
+- Solid-base stop path: Moonlight `/cancel` responds before nested teardown; owner cancel ignores stale sessiontoken (case-insensitive UUID); portal PipeWire disconnect under loop lock; gamescope path launches stock steam-appid detached via runtime wrap (mode-agnostic imports).
 
 ## v1.3.1 - 2026-07-12
 

@@ -40,12 +40,24 @@ namespace {
     );
   }
 
-  std::string read_rtsp_source_for_contract() {
-    const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / "src/rtsp.cpp";
+  std::string read_source_for_contract(const char *relative_path) {
+    const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / relative_path;
     std::ifstream in(path);
     std::ostringstream out;
     out << in.rdbuf();
     return out.str();
+  }
+
+  std::string read_rtsp_source_for_contract() {
+    return read_source_for_contract("src/rtsp.cpp");
+  }
+
+  std::string read_nvhttp_source_for_contract() {
+    return read_source_for_contract("src/nvhttp.cpp");
+  }
+
+  std::string read_portal_grab_source_for_contract() {
+    return read_source_for_contract("src/platform/linux/portal_grab.cpp");
   }
 }
 
@@ -118,6 +130,50 @@ TEST(SessionStopContractTests, TerminateSessionsUsesGracefulStopBeforeJoin) {
   EXPECT_LT(graceful, join);
   // Hard stop alone is insufficient for host-initiated cancel/disconnect.
   EXPECT_EQ(clear_body.find("stream::session::stop("), std::string::npos);
+}
+
+TEST(SessionStopContractTests, CancelAnswersClientBeforeNestedTeardown) {
+  // SB-2 residual: nested gamescope undo can SEGV mid-cancel; Moonlight must
+  // already have cancel=1 or it maps the failed HTTP as "another device".
+  const auto source = read_nvhttp_source_for_contract();
+  ASSERT_FALSE(source.empty());
+  const auto cancel_start = source.find("void cancel(resp_https_t response, req_https_t request)");
+  ASSERT_NE(cancel_start, std::string::npos);
+  const auto cancel_end = source.find("void appasset(", cancel_start);
+  ASSERT_NE(cancel_end, std::string::npos);
+  const auto body = source.substr(cancel_start, cancel_end - cancel_start);
+  const auto preflight = body.find("get_session_stop_snapshot(");
+  const auto respond = body.find("response_written = true");
+  const auto shutdown = body.find("request_session_shutdown(");
+  EXPECT_NE(preflight, std::string::npos);
+  ASSERT_NE(respond, std::string::npos);
+  ASSERT_NE(shutdown, std::string::npos);
+  // Preflight + respond before the teardown shutdown call.
+  EXPECT_LT(preflight, respond);
+  EXPECT_LT(respond, shutdown);
+  EXPECT_NE(body.find("is_session_owner("), std::string::npos);
+}
+
+TEST(SessionStopContractTests, PortalPipeWireTeardownDisconnectsUnderLoopLock) {
+  // SB-2: destroy without disconnect under lock races state_changed → SEGV.
+  const auto source = read_portal_grab_source_for_contract();
+  ASSERT_FALSE(source.empty());
+  const auto dtor = source.find("~pw_capture_t()");
+  ASSERT_NE(dtor, std::string::npos);
+  const auto dtor_end = source.find("static void on_process", dtor);
+  ASSERT_NE(dtor_end, std::string::npos);
+  const auto body = source.substr(dtor, dtor_end - dtor);
+  const auto stop = body.find("pw_thread_loop_stop(");
+  const auto lock = body.find("pw_thread_loop_lock(");
+  const auto disconnect = body.find("pw_stream_disconnect(");
+  const auto destroy = body.find("pw_stream_destroy(");
+  EXPECT_NE(stop, std::string::npos);
+  ASSERT_NE(lock, std::string::npos);
+  ASSERT_NE(disconnect, std::string::npos);
+  ASSERT_NE(destroy, std::string::npos);
+  EXPECT_LT(stop, lock);
+  EXPECT_LT(lock, disconnect);
+  EXPECT_LT(disconnect, destroy);
 }
 
 TEST(SessionStopContractTests, DuplicateStopIsRejectedWhileStopIsInProgress) {
