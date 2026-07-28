@@ -252,16 +252,34 @@ namespace stream_runtime {
         // Attach path policy (SB-5): force X11 on gamescope XWayland so Steam/
         // native titles do not paint on host Wayland (black portal stream).
         // Nested WSI is only for the optional Big Picture polaris-hdr-session entry.
+        // Still inject DXVK/Proton HDR env when polaris-hdr-force=1 so games can
+        // present HDR10 into --hdr-enabled gamescope (stream path was already PQ).
         const auto display = x11_display_.empty() ? std::string {":1"} : x11_display_;
+        bool want_game_hdr = false;
+        {
+          std::ifstream f(xdg_runtime_dir() + "/polaris-hdr-force");
+          std::string line;
+          if (f && std::getline(f, line)) {
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r' || line.back() == ' ')) {
+              line.pop_back();
+            }
+            want_game_hdr = (line == "1" || line == "true");
+          }
+        }
         std::ostringstream out;
         out << "env -u WAYLAND_DISPLAY -u CLUTTER_BACKEND "
             << "-u ELECTRON_OZONE_PLATFORM_HINT -u MOZ_ENABLE_WAYLAND "
             << "-u ENABLE_GAMESCOPE_WSI -u ENABLE_HDR_WSI "
+            // Native Wayland Proton fights XWayland attach; drop if set in Steam launch opts.
+            << "-u PROTON_ENABLE_WAYLAND "
             << "DISPLAY=" << shell_quote(display) << " "
             << "GAMESCOPE_WAYLAND_DISPLAY=" << shell_quote(socket_name_) << " "
             << "GDK_BACKEND=x11 SDL_VIDEODRIVER=x11 XDG_SESSION_TYPE=x11 "
-            << "QT_QPA_PLATFORM=xcb STEAM_MULTIPLE_XWAYLANDS=1 "
-            << "bash -lc " << shell_quote(cmd);
+            << "QT_QPA_PLATFORM=xcb STEAM_MULTIPLE_XWAYLANDS=1 ";
+        if (want_game_hdr) {
+          out << "DXVK_HDR=1 PROTON_ENABLE_HDR=1 STEAM_GAMESCOPE_HDR_SUPPORTED=1 ";
+        }
+        out << "bash -lc " << shell_quote(cmd);
         return out.str();
       }
 

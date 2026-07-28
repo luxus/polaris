@@ -5572,6 +5572,8 @@ namespace proc {
           cmd_env.erase("MOZ_ENABLE_WAYLAND");
           cmd_env.erase("ENABLE_GAMESCOPE_WSI");
           cmd_env.erase("ENABLE_HDR_WSI");
+          // XWayland attach: native Wayland Proton fights DISPLAY=:1 / no WAYLAND_DISPLAY.
+          cmd_env.erase("PROTON_ENABLE_WAYLAND");
           cmd_env["AT_SPI_BUS_ADDRESS"] = "";
           if (!cage_socket.empty()) {
             cmd_env["GAMESCOPE_WAYLAND_DISPLAY"] = cage_socket;
@@ -5582,6 +5584,14 @@ namespace proc {
           cmd_env["XDG_SESSION_TYPE"] = "x11";
           cmd_env["QT_QPA_PLATFORM"] = "xcb";
           cmd_env["STEAM_MULTIPLE_XWAYLANDS"] = "1";
+          // Match polaris-hdr-session nested path: game must present HDR into
+          // --hdr-enabled gamescope. Stream tags alone do not turn on DXVK HDR.
+          if (launch_session->enable_hdr) {
+            cmd_env["DXVK_HDR"] = "1";
+            cmd_env["PROTON_ENABLE_HDR"] = "1";
+            cmd_env["STEAM_GAMESCOPE_HDR_SUPPORTED"] = "1";
+            BOOST_LOG(info) << "gamescope_runtime: game HDR env DXVK_HDR=1 PROTON_ENABLE_HDR=1 STEAM_GAMESCOPE_HDR_SUPPORTED=1"sv;
+          }
           const auto launch_cmd = command_with_gamepad_isolation(cmd);
           boost::filesystem::path working_dir = _app.working_dir.empty() ?
                                                   find_working_directory(_app.detached[i], cmd_env) :
@@ -5702,6 +5712,7 @@ namespace proc {
         launch_env.erase("MOZ_ENABLE_WAYLAND");
         launch_env.erase("ENABLE_GAMESCOPE_WSI");
         launch_env.erase("ENABLE_HDR_WSI");
+        launch_env.erase("PROTON_ENABLE_WAYLAND");
         launch_env["AT_SPI_BUS_ADDRESS"] = "";
         if (!cage_socket.empty()) {
           launch_env["GAMESCOPE_WAYLAND_DISPLAY"] = cage_socket;
@@ -5715,8 +5726,14 @@ namespace proc {
         launch_env["XDG_SESSION_TYPE"] = "x11";
         launch_env["QT_QPA_PLATFORM"] = "xcb";
         launch_env["STEAM_MULTIPLE_XWAYLANDS"] = "1";
+        if (launch_session->enable_hdr) {
+          launch_env["DXVK_HDR"] = "1";
+          launch_env["PROTON_ENABLE_HDR"] = "1";
+          launch_env["STEAM_GAMESCOPE_HDR_SUPPORTED"] = "1";
+        }
         BOOST_LOG(info) << "private_runtime: gamescope attach env DISPLAY="sv << cage_display
                         << " GAMESCOPE_WAYLAND_DISPLAY="sv << cage_socket
+                        << " enable_hdr="sv << (launch_session->enable_hdr ? "true"sv : "false"sv)
                         << " (WAYLAND_DISPLAY unset) for app command"sv;
       }
       else if (!cage_socket.empty()) {
