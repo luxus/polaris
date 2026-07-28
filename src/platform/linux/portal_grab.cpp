@@ -1477,8 +1477,18 @@ namespace portal {
     }
 
     // Session prep writes $XDG_RUNTIME_DIR/polaris-hdr-force (1 when client HDR).
-    // Only then claim HDR + stub mastering metadata so SDR keeps normal colors.
+    // Only private gamescope portal can produce real 10-bit HDR frames. Host KDE
+    // ScreenCast is 8-bit BGRx/MemFd today — claiming HDR PQ with those pixels
+    // yields the dark/red "HDR garbage" look. Keep host portal honest as SDR.
+    static bool portal_on_private_bus() {
+      const char *addr = std::getenv("POLARIS_PORTAL_DBUS_ADDRESS");
+      return addr && *addr;
+    }
+
     static bool portal_force_hdr_enabled() {
+      if (!portal_on_private_bus()) {
+        return false;
+      }
       const char *rt = std::getenv("XDG_RUNTIME_DIR");
       if (!rt || !*rt) {
         return false;

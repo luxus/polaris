@@ -3355,8 +3355,26 @@ namespace video {
       // Portal SHM CUDA is NV12-only: prefer GPU 8-bit over software 10-bit.
       // 8-bit NV12 when: SHM path cannot do 10-bit GPU frames, OR stream is non-HDR
       // (client 10-bit SDR still sets dynamicRange=1 → portal DmaBuf was encoding p010 ~8ms).
-      if (result && colorspace.bit_depth == 10 &&
-          (result->prefer_8bit_encode || !colorspace_is_hdr(colorspace))) {
+      // If the capture path is 8-bit-only but colorspace is still HDR PQ, demote to
+      // full SDR — bit_depth=8 alone still attaches Rec.2020+PQ metadata and the
+      // client shows dark/red "HDR garbage" over SDR pixels.
+      if (result && result->prefer_8bit_encode && colorspace_is_hdr(colorspace)) {
+        BOOST_LOG(warning)
+          << "Forcing SDR colorspace: capture path cannot produce 10-bit HDR frames "
+             "(host portal SHM/MemFd is 8-bit BGRx). Use gamescope_stream for real HDR."sv;
+        colorspace = colorspace_from_client_config(config, /*hdr_metadata_available=*/false);
+        colorspace.bit_depth = 8;
+        if (auto pix8 = select_encoder_output_pix_fmt(encoder, config, colorspace)) {
+          result = disp.make_avcodec_encode_device(*pix8);
+          if (result) {
+            result->prefer_8bit_encode = true;
+          }
+        }
+        BOOST_LOG(info) << "Color coding (after 8-bit capture demote): " << color_coding_label(colorspace);
+        BOOST_LOG(info) << "HDR decision (after 8-bit capture demote): stream_hdr_enabled=false";
+      }
+      else if (result && colorspace.bit_depth == 10 &&
+               (result->prefer_8bit_encode || !colorspace_is_hdr(colorspace))) {
         if (result->prefer_8bit_encode) {
           BOOST_LOG(info) << "Using 8-bit NV12 CUDA upload for capture path that cannot do 10-bit GPU frames"sv;
         } else {

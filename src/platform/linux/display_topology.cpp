@@ -9,6 +9,7 @@
 
   #include "src/config.h"
   #include "src/logging.h"
+  #include "src/platform/common.h"
   #include "stream_display_policy.h"
 
   #include <cctype>
@@ -20,6 +21,7 @@
   #include <string>
   #include <system_error>
   #include <thread>
+  #include <vector>
 
 using namespace std::literals;
 
@@ -260,18 +262,32 @@ namespace display_topology {
   // Host ScreenCast restore token path (must match portal_grab token_path host branch).
   // Privacy blanking without this token leaves KDE waiting on a picker nobody can see.
   bool host_portal_restore_token_present() {
-    std::string base = config::sunshine.config_file.empty()
-      ? std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") + "/.config/sunshine"
-      : config::sunshine.config_file.substr(0, config::sunshine.config_file.rfind('/'));
-    const fs::path path = fs::path(base) / "portal_restore_token_host.txt";
-    std::error_code ec;
-    if (!fs::is_regular_file(path, ec)) {
-      return false;
+    std::vector<fs::path> candidates;
+    if (!config::sunshine.config_file.empty()) {
+      const auto slash = config::sunshine.config_file.rfind('/');
+      if (slash != std::string::npos) {
+        candidates.emplace_back(fs::path(config::sunshine.config_file.substr(0, slash)) /
+                                "portal_restore_token_host.txt");
+      }
     }
-    std::ifstream in(path);
-    std::string token;
-    std::getline(in, token);
-    return !token.empty();
+    // Always also check appdata() — matches where portal_grab persists tokens.
+    candidates.emplace_back(platf::appdata() / "portal_restore_token_host.txt");
+
+    for (const auto &path : candidates) {
+      std::error_code ec;
+      if (!fs::is_regular_file(path, ec)) {
+        continue;
+      }
+      std::ifstream in(path);
+      std::string token;
+      std::getline(in, token);
+      if (!token.empty()) {
+        BOOST_LOG(info) << "display_topology: host restore token present at "sv << path.string();
+        return true;
+      }
+    }
+    BOOST_LOG(info) << "display_topology: no host restore token yet (portal bootstrap)"sv;
+    return false;
   }
 
   int run_kscreen(const std::string &args) {
@@ -312,6 +328,19 @@ namespace display_topology {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));
 
+    const bool portal_capture = config::video.capture.empty() ||
+                                config::video.capture == "auto" ||
+                                config::video.capture == "portal";
+    // Host portal ScreenCast is 8-bit SDR. Leave the streaming output in SDR so
+    // KWin dumps tone-mapped BGRx instead of an HDR compositor view.
+    if (portal_capture) {
+      ret = run_kscreen("output." + cfg.streaming_output + ".hdr.disable output." +
+                        cfg.streaming_output + ".wcg.disable");
+      if (ret != 0) {
+        BOOST_LOG(warning) << "display_topology: could not disable HDR/WCG on streaming output code="sv << ret;
+      }
+    }
+
     if (privacy && distinct) {
       ret = run_kscreen("output." + cfg.streaming_output + ".priority.1");
       if (ret != 0) {
@@ -322,9 +351,6 @@ namespace display_topology {
       // Portal capture on host KDE needs either a saved restore token (auto Start)
       // or a visible desk for the one-time ScreenCast picker. Blanking without a
       // token guarantees no video.
-      const bool portal_capture = config::video.capture.empty() ||
-                                  config::video.capture == "auto" ||
-                                  config::video.capture == "portal";
       const bool blank_primary = !portal_capture || host_portal_restore_token_present();
       if (blank_primary) {
         ret = run_kscreen("output." + cfg.primary_output + ".disable");
