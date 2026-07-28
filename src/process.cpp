@@ -91,6 +91,7 @@
 
 #include "device_db.h"
 #include "ai_optimizer.h"
+#include "browser_stream.h"
 #include "stream_stats.h"
 #include "game_classifier.h"
 
@@ -6054,12 +6055,20 @@ namespace proc {
     placebo = false;
 
 #ifdef __linux__
-    // SB-2: release portal/PipeWire capture *before* Steam/cage/gamescope kill.
-    // streaming_will_stop also does this after RTSP join; belt-and-suspenders for
-    // terminate paths that skip session join or race host quit.
+    // SB-2 ordered teardown (issue #2):
+    // 1) join Browser Stream capture threads (sync)
+    // 2) release portal/PipeWire while compositor is still alive
+    // 3) brief settle
+    // 4) only then pidfd-kill Steam/cage/gamescope
+    // Browser Stream used to stop capture async *after* this kill → polaris
+    // SEGV in pipewire_capture::on_param_changed and gamescope CVulkanDevice dtor.
+    browser_stream::prepare_for_session_teardown();
 #ifdef POLARIS_BUILD_PORTAL
+    // Idempotent if prepare_for_session_teardown already released.
     portal::release_global_capture();
 #endif
+    // Give PipeWire/gamescope a beat to finish disconnect before SIGTERM.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     stop_steam_big_picture_input_guard();
     if (!immediate) {
       terminate_session_owned_steam_before_cage_stop();

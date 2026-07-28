@@ -57,6 +57,12 @@ extern "C" {
   #include <dirent.h>
   #include <sys/stat.h>
   #include <unistd.h>
+  #ifdef POLARIS_BUILD_PORTAL
+  // portal_grab.cpp — drop ScreenCast/PipeWire before nested compositor kill.
+  namespace portal {
+    void release_global_capture();
+  }
+  #endif
 #endif
 
 using namespace std::literals;
@@ -1558,6 +1564,25 @@ namespace browser_stream {
     return valid;
   }
 
+  void prepare_for_session_teardown() {
+#ifdef __linux__
+    // Join video/audio capture *before* any nested compositor kill. The async
+    // path left portal PipeWire attached while pidfd SIGTERM'd gamescope →
+    // pipewire_capture::on_param_changed → pw_stream_queue_buffer SEGV and
+    // gamescope CVulkanDevice dtor SEGV (SB-2 / issue #2).
+    const bool had_media = video_capture_active() || audio_capture_active();
+    stop_video_capture();
+#ifdef POLARIS_BUILD_PORTAL
+    portal::release_global_capture();
+#endif
+    // Only settle when we actually dropped a live capture — avoids stacking
+    // 100ms delays when prepare is called from stop + terminate + disconnect.
+    if (had_media) {
+      std::this_thread::sleep_for(100ms);
+    }
+#endif
+  }
+
   bool stop_session(std::string_view token) {
     auto record = take_session_token(token);
     bool stopped = record.has_value();
@@ -1578,8 +1603,10 @@ namespace browser_stream {
         stop_helper_locked();
       }
     }
-    if (should_stop_capture) {
-      stop_video_capture_async();
+    // Always drop capture when this token owned media, even if the helper
+    // already exited (partial stop / crash recovery).
+    if (should_stop_capture || should_stop_app || video_capture_active() || audio_capture_active()) {
+      prepare_for_session_teardown();
     }
     if (should_stop_app) {
       proc::proc.terminate(false, false);

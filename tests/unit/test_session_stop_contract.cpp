@@ -203,6 +203,70 @@ TEST(SessionStopContractTests, StreamingWillStopReleasesPortalCapture) {
   EXPECT_NE(body.find("portal::release_global_capture("), std::string::npos);
 }
 
+TEST(SessionStopContractTests, BrowserStreamStopJoinsCaptureBeforeAppTerminate) {
+  // SB-2 residual (issue #2): async stop left PipeWire attached while terminate
+  // killed gamescope → polaris SEGV in on_param_changed and gamescope
+  // CVulkanDevice dtor. stop_session must sync-join capture before terminate.
+  const auto source = read_source_for_contract("src/browser_stream.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto stop_start = source.find("bool stop_session(std::string_view token)");
+  ASSERT_NE(stop_start, std::string::npos);
+  const auto stop_end = source.find("nlohmann::json status_json()", stop_start);
+  ASSERT_NE(stop_end, std::string::npos);
+  const auto body = source.substr(stop_start, stop_end - stop_start);
+  const auto prepare = body.find("prepare_for_session_teardown(");
+  const auto terminate = body.find("proc::proc.terminate(");
+  ASSERT_NE(prepare, std::string::npos);
+  ASSERT_NE(terminate, std::string::npos);
+  EXPECT_LT(prepare, terminate);
+  // Async stop must not race terminate on the stop path.
+  EXPECT_EQ(body.find("stop_video_capture_async("), std::string::npos);
+}
+
+TEST(SessionStopContractTests, PrepareForSessionTeardownIsSynchronous) {
+  const auto source = read_source_for_contract("src/browser_stream.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto start = source.find("void prepare_for_session_teardown()");
+  ASSERT_NE(start, std::string::npos);
+  const auto body = source.substr(start, 600);
+  EXPECT_NE(body.find("stop_video_capture("), std::string::npos);
+  EXPECT_EQ(body.find("stop_video_capture_async("), std::string::npos);
+  EXPECT_NE(body.find("release_global_capture("), std::string::npos);
+}
+
+TEST(SessionStopContractTests, TerminateImplStopsBrowserCaptureBeforeIsolatedKill) {
+  // terminate_impl is shared by WebUI disconnect, Moonlight cancel residual,
+  // and browser stop — all must stop media before pidfd kill.
+  const auto source = read_source_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto start = source.find("void proc_t::terminate_impl(");
+  ASSERT_NE(start, std::string::npos);
+  const auto body = source.substr(start, 1600);
+  const auto prepare = body.find("browser_stream::prepare_for_session_teardown(");
+  const auto release = body.find("portal::release_global_capture(");
+  const auto kill = body.find("terminate_isolated_session_generation(");
+  ASSERT_NE(prepare, std::string::npos);
+  ASSERT_NE(release, std::string::npos);
+  ASSERT_NE(kill, std::string::npos);
+  EXPECT_LT(prepare, release);
+  EXPECT_LT(release, kill);
+}
+
+TEST(SessionStopContractTests, WebUiDisconnectPreparesBrowserCaptureBeforeForceStop) {
+  const auto source = read_source_for_contract("src/confighttp.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto start = source.find("void disconnect(resp_https_t response, req_https_t request)");
+  ASSERT_NE(start, std::string::npos);
+  const auto end = source.find("void sendWol(", start);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
+  const auto prepare = body.find("browser_stream::prepare_for_session_teardown(");
+  const auto force = body.find("proc::proc.terminate(");
+  ASSERT_NE(prepare, std::string::npos);
+  ASSERT_NE(force, std::string::npos);
+  EXPECT_LT(prepare, force);
+}
+
 TEST(SessionStopContractTests, DuplicateStopIsRejectedWhileStopIsInProgress) {
   EXPECT_EQ(
     decide(true, true, 1, true, session_role_e::controller, true),

@@ -29,6 +29,13 @@ namespace browser_stream {
   );
   nlohmann::json submit_input(std::string_view token, const nlohmann::json &events);
   bool stop_session(std::string_view token);
+  /**
+   * @brief Synchronously stop Browser Stream media capture before nested teardown.
+   *
+   * SB-2: must complete (join capture threads + drop portal/PipeWire) before
+   * gamescope/labwc is killed. Async stop races compositor death → host SEGV.
+   */
+  void prepare_for_session_teardown();
   session_token_t issue_session_token(std::string_view remote_address, std::string_view app_uuid = {}, bool owns_app = false);
   bool consume_session_token(std::string_view token, std::string_view remote_address);
 }  // namespace browser_stream

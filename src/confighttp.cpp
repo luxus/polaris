@@ -4068,6 +4068,9 @@ namespace confighttp {
       // Host-operator path: WebUI disconnect must fully end the stream (RTSP +
       // app + path cleanup), not only stop one RTSP session by uuid.
       // Moonlight cancel keeps ownership rules; Dashboard is force-stop.
+      // SB-2: drop Browser Stream capture/portal before nested kill so polaris
+      // survives and this HTTPS handler can still write a response body.
+      browser_stream::prepare_for_session_teardown();
       bool stopped = false;
       if (!uuid.empty()) {
         const auto shutdown = proc::proc.request_session_shutdown(uuid, {}, true, false);
@@ -4570,9 +4573,15 @@ namespace confighttp {
       BOOST_LOG(warning) << "BrowserStreamStop: "sv << e.what();
     }
 
+    // SB-2: always release capture first so a missing/stale token still leaves
+    // the host without a live portal stream into gamescope (gate stream_stop).
+    browser_stream::prepare_for_session_teardown();
+    const bool stopped = !token.empty() && browser_stream::stop_session(token);
+
     nlohmann::json output;
     output["status"] = true;
-    output["stopped"] = !token.empty() && browser_stream::stop_session(token);
+    output["stopped"] = stopped;
+    // Answer the WebUI before any residual nested undo work can wedge accept.
     send_response(response, output);
   }
 

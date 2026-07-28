@@ -8,17 +8,17 @@
 
 | SB | Status | Notes |
 |----|--------|--------|
-| #1 Preview | **Closed** | Live Web UI + gate mid-stream; last-frame / gamescopectl. |
-| #2 Clean stop / RST | **Code hardened+** | Graceful stop + flush; `/cancel` answers before nested teardown; portal PW disconnect under loop lock; **portal/PW release before Steam/cage kill** (`streaming_will_stop` + `terminate_impl`). Residual: post-deploy Moonlight connect/disconnect smoke. |
-| #3 WebUI disconnect | **Closed** | Force disconnect verified. |
-| #4 Cancel 470 | **Closed+** | Controller role; owner case-insensitive; owner skips stale sessiontoken; cancel preflight + respond-first. |
+| #1 Preview | **Open (regressed)** | Gate **preview=fail**: idle `/api/display/screenshot` black / ≤50KB. Mid-stream `stream_preview=ok` (gamescopectl/last-frame path works under load). Fix idle capture or gamescopectl fallback before stream start. |
+| #2 Clean stop / RST | **Code landed (verify)** | Root cause: async capture stop raced pidfd kill of gamescope → polaris SEGV in `pw_stream_queue_buffer` / gamescope `CVulkanDevice` dtor (coredump stacks). Fix: sync `prepare_for_session_teardown` before terminate; shared by browser stop, terminate_impl, WebUI disconnect. Re-run gate after deploy. |
+| #3 WebUI disconnect | **Code landed (verify)** | Same prepare path in `disconnect` + `terminate_impl`; should return body when polaris survives stop. Re-run gate after deploy. |
+| #4 Cancel 470 | **Code landed** | Controller role; owner case-insensitive; owner skips stale sessiontoken; cancel preflight + respond-first. Not re-proven this gate run (no Moonlight cancel step). |
 | #5 Mode-agnostic apps | **Code landed** | Polaris gamescope runtime wraps detached steam-appid launches (no hdr-session hardwire). luxusAi inject: explicit non-gamescope modes stay neutral; legacy portal+no-cage only when mode unset. E2E mode-switch still open. |
-| #6 Smoke harness | **Closed** | `solid-base-gate.sh` green + workflow docs. |
-| #7 Portal units | **Closed** | Unit-owned stack; cold-boot cursor-mode omit + rebind. |
+| #6 Smoke harness | **Partial** | `solid-base-gate.sh` runs end-to-end; this run **fail**. Need `--max-time` on curl stop/disconnect helpers so agent runs cannot hang forever. |
+| #7 Portal units | **Ok this run** | Gate **units=ok screencast=ok**. |
 | Portal token/cursor | **Code landed** | Keep restore_token; invalidate+retry once on SelectSources failure; wait for AvailableCursorModes≠0; never permanently disable tokens. |
 
-**Gate line (pre this commit, lea):**  
-`solid-base-gate: units=ok screencast=ok preview=ok stream_start=ok stream_preview=ok stream_stop=ok webui_stop=ok dual_socket=ok encode=ok` → **pass** (blockers: none)
+**Gate line (this stabilize run, lea):**  
+`solid-base-gate: units=ok screencast=ok preview=fail stream_start=ok stream_preview=ok stream_stop=fail webui_stop=fail dual_socket=ok encode=ok` → **fail** (blockers: `preview`, `stream_stop`, `webui_stop`)
 
 **Pin note:** after deploying this tip, drop or refresh `polaris-hdr-linux-patches` `fix-cancel-owner-token.patch` (now upstreamed).
 
@@ -131,11 +131,16 @@ All Steam imports: `polaris-hdr-session start|wait`. Mode switches need manual a
 
 ## 4. Rewrite deliverables still open
 
-- [x] SB-1,3,4,6,7 closed (2026-07-28)
-- [x] SB-2 cancel-before-teardown + portal PW lock teardown + graceful stop (2026-07-28)
-- [x] SB-2 portal release before nested kill (`release_global_capture`) (2026-07-28)
+- [ ] SB-1 idle preview green again (gate `preview=ok`; frames non-black and >50KB before stream start)
+- [ ] SB-2 browser-stream `session/stop` returns body promptly (gate `stream_stop=ok`); no HTTPS wedge — **code ready, needs post-deploy gate**
+- [ ] SB-3 `POST /api/clients/disconnect` after browser-stream teardown (gate `webui_stop=ok`) — **code ready, needs post-deploy gate**
+- [ ] Gate curl helpers: `--max-time` on stop/disconnect so agent runs cannot hang forever
+- [x] SB-2 cancel-before-teardown + portal PW lock teardown + graceful stop (2026-07-28 code)
+- [x] SB-2 portal release before nested kill (`release_global_capture`) (2026-07-28 code)
+- [x] SB-2 sync capture join before gamescope kill (browser_stream + terminate_impl + disconnect) (2026-07-28)
 - [x] Portal restore_token invalidate+retry + cursor wait (2026-07-28)
 - [x] SB-5 gamescope wrap detached steam-appid + inject mode-explicit (2026-07-28)
+- [ ] SB-4 Moonlight `/cancel` re-smoke (not in this gate line)
 - [ ] SB-2 post-deploy Moonlight connect/disconnect without client-visible fail / host SEGV
 - [ ] SB-5 E2E labwc / dongle / gamescope mode switch with stock apps.json
 - [ ] Owned `gamescope_stream` start/wait/stop + attach-idle polish

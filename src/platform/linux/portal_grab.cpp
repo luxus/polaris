@@ -625,7 +625,8 @@ namespace portal {
 
   static void on_process(void *userdata) {
     auto *cap = static_cast<pw_capture_t *>(userdata);
-    if (!cap || !cap->pw_stream_handle) {
+    // running is cleared before loop stop; ignore late process callbacks.
+    if (!cap || !cap->running.load(std::memory_order_acquire) || !cap->pw_stream_handle) {
       return;
     }
     struct pw_buffer *b = pw_stream_dequeue_buffer(cap->pw_stream_handle);
@@ -651,6 +652,9 @@ namespace portal {
 
   static void on_param_changed(void *userdata, uint32_t id, const struct spa_pod *param) {
     auto *cap = static_cast<pw_capture_t *>(userdata);
+    if (!cap || !cap->running.load(std::memory_order_acquire) || !cap->pw_stream_handle) {
+      return;
+    }
     if (!param || id != SPA_PARAM_Format) return;
 
     uint32_t media_type, media_subtype;
