@@ -78,7 +78,8 @@ TEST(PortalGrabPolicyTests, EnsureGlobalCaptureLockContractAndUniqueTokens) {
   //   (never nested lock via ensure_global_session while holding g_portal_mu)
   // - format negotiation waits outside g_portal_mu
   // - ScreenCast handle tokens are unique per request
-  // - Start timeout clears restore_token and retries once
+  // - Start timeout clears restore_token (no Start retry — "Can only start once")
+  // - host vs private restore tokens are separate files
   // - optional private portal bus is client-side only (env reader)
   const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / "src/platform/linux/portal_grab.cpp";
   std::ifstream in(path);
@@ -90,6 +91,9 @@ TEST(PortalGrabPolicyTests, EnsureGlobalCaptureLockContractAndUniqueTokens) {
   EXPECT_NE(body.find("Wait outside g_portal_mu"), std::string::npos);
   EXPECT_NE(body.find("next_handle_token("), std::string::npos);
   EXPECT_NE(body.find("Start timeout/failure"), std::string::npos);
+  EXPECT_NE(body.find("no Start retry"), std::string::npos);
+  EXPECT_NE(body.find("portal_restore_token_host.txt"), std::string::npos);
+  EXPECT_NE(body.find("portal_restore_token_private.txt"), std::string::npos);
   EXPECT_NE(body.find("POLARIS_PORTAL_DBUS_ADDRESS"), std::string::npos);
   EXPECT_NE(body.find("polaris-hdr-force"), std::string::npos);
   EXPECT_NE(body.find("pipewire_capture::capture_t"), std::string::npos);
@@ -126,6 +130,23 @@ TEST(PortalGrabPolicyTests, HeadlessDongleNormalizeForcesKmsCapture) {
   EXPECT_NE(body.find("k_headless_dongle"), std::string::npos);
   // Dongle defaults to portal (host ScreenCast); explicit kms still allowed.
   EXPECT_NE(body.find("capture = \"portal\""), std::string::npos);
+}
+
+TEST(PortalGrabPolicyTests, DonglePrivacyBootstrapKeepsDeskWithoutHostToken) {
+  // Source contract: atomic enable+disable is forbidden; privacy blank only when
+  // portal_restore_token_host.txt exists (or capture is non-portal).
+  const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / "src/platform/linux/display_topology.cpp";
+  std::ifstream in(path);
+  ASSERT_TRUE(in.good());
+  std::ostringstream out;
+  out << in.rdbuf();
+  const auto body = out.str();
+  EXPECT_NE(body.find("host_portal_restore_token_present"), std::string::npos);
+  EXPECT_NE(body.find("bootstrap"), std::string::npos);
+  EXPECT_NE(body.find("portal_restore_token_host.txt"), std::string::npos);
+  EXPECT_NE(body.find("QT_QPA_PLATFORM=wayland"), std::string::npos);
+  // Staged enable before disable — not a single atomic enable+disable command.
+  EXPECT_NE(body.find("enable streaming output"), std::string::npos);
 }
 
 TEST(PipeWireCapturePolicyTests, MapsSupportedSpaFormatsToDrmFormats) {

@@ -71,22 +71,23 @@ namespace portal {
     if (private_bus && *private_bus) {
       return base + "/portal_restore_token_private.txt";
     }
-    return base + "/portal_restore_token_host.txt";
-  }
-
-  static bool portal_uses_private_bus() {
-    const char *addr = std::getenv("POLARIS_PORTAL_DBUS_ADDRESS");
-    return addr && *addr;
-  }
-
-  // Host-desktop dongle must not reuse restore tokens from gamescope private portal.
-  static bool portal_should_use_restore_token() {
-    if (!portal_uses_private_bus()) {
-      const auto &mode = config::video.linux_display.stream_mode;
-      if (mode == "headless_dongle" || mode == "desktop_display" || mode == "headless_evdi") {
-        return false;
+    const std::string host = base + "/portal_restore_token_host.txt";
+    // One-time migration from the pre-split single token file (host only).
+    const std::string legacy = base + "/portal_restore_token.txt";
+    std::error_code ec;
+    if (!std::filesystem::exists(host, ec) && std::filesystem::is_regular_file(legacy, ec)) {
+      std::error_code copy_ec;
+      std::filesystem::copy_file(legacy, host, copy_ec);
+      if (!copy_ec) {
+        BOOST_LOG(info) << "portal: migrated legacy restore token to "sv << host;
       }
     }
+    return host;
+  }
+
+  // Always prefer restore tokens when present. Host vs private gamescope portals
+  // use separate on-disk files (token_path), so they cannot cross-contaminate.
+  static bool portal_should_use_restore_token() {
     return true;
   }
 
@@ -691,8 +692,6 @@ namespace portal {
         return resp;
       };
 
-      // Dongle/host monitor path: never feed restore tokens (often from private
-      // gamescope portal) — KDE Start hangs ~client timeout with no PW node.
       const bool prefer_restore = portal_should_use_restore_token();
       const bool had_saved_token = prefer_restore && !load_restore_token().empty();
       auto *resp = try_select_sources(next_handle_token("polaris_ss"), prefer_restore);
@@ -713,11 +712,18 @@ namespace portal {
       g_variant_unref(resp);
     }
 
-    // Step 3: Start. Keep timeout under Moonlight's ~10s connect budget so we can
-    // clear tokens and fail closed instead of wedging videoThread → Hang/SIGTRAP.
-    BOOST_LOG(info) << "portal: Starting capture (window picker may appear)..."sv;
+    // Step 3: Start. With a host restore token this is non-interactive and must
+    // finish under Moonlight's connect budget. Without a token KDE shows a picker
+    // (desk must stay visible — see display_topology bootstrap); give the user
+    // longer. Do NOT retry Start on the same session — KDE returns
+    // "Can only start once" and wastes another timeout.
+    const bool had_token_for_start = !load_restore_token().empty();
+    const int start_timeout_ms = had_token_for_start ? 8000 : 45000;
+    BOOST_LOG(info) << "portal: Starting capture"
+                    << (had_token_for_start ? " (restore auto-select)"sv :
+                                              " (ScreenCast picker may appear on host — approve once)"sv)
+                    << " timeout_ms="sv << start_timeout_ms << ""sv;
     {
-      constexpr int start_timeout_ms = 8000;
       auto try_start = [&](const std::string &handle_token) -> GVariant * {
         std::string req_path = make_request_path(session->conn, handle_token);
 
@@ -736,13 +742,12 @@ namespace portal {
 
       auto *resp = try_start(next_handle_token("polaris_st"));
       if (!resp) {
+        // Bad/stale restore token often hangs Start with no Response; drop it so
+        // the next connect can re-bootstrap with a visible picker.
         clear_restore_token();
-        BOOST_LOG(warning) << "portal: Start timeout/failure — cleared restore_token; retry once"sv;
-        resp = try_start(next_handle_token("polaris_st"));
-        if (!resp) {
-          session->failed = true;
-          return session;
-        }
+        BOOST_LOG(warning) << "portal: Start timeout/failure — cleared restore_token (no Start retry; session is single-use)"sv;
+        session->failed = true;
+        return session;
       }
 
       // Parse streams

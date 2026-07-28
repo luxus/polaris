@@ -13,10 +13,12 @@
 
   #include <cctype>
   #include <chrono>
+  #include <cstdlib>
   #include <cstdio>
   #include <filesystem>
   #include <fstream>
   #include <string>
+  #include <system_error>
   #include <thread>
 
 using namespace std::literals;
@@ -255,6 +257,31 @@ namespace display_topology {
     return false;
   }
 
+  // Host ScreenCast restore token path (must match portal_grab token_path host branch).
+  // Privacy blanking without this token leaves KDE waiting on a picker nobody can see.
+  bool host_portal_restore_token_present() {
+    std::string base = config::sunshine.config_file.empty()
+      ? std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") + "/.config/sunshine"
+      : config::sunshine.config_file.substr(0, config::sunshine.config_file.rfind('/'));
+    const fs::path path = fs::path(base) / "portal_restore_token_host.txt";
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec)) {
+      return false;
+    }
+    std::ifstream in(path);
+    std::string token;
+    std::getline(in, token);
+    return !token.empty();
+  }
+
+  int run_kscreen(const std::string &args) {
+    // QT_QPA_PLATFORM=wayland avoids kscreen-doctor aborting under a tty agent
+    // session; timeout guards against hangs on some hosts.
+    const std::string cmd = "timeout 8 env QT_QPA_PLATFORM=wayland kscreen-doctor " + args;
+    BOOST_LOG(info) << "display_topology: ["sv << cmd << "]"sv;
+    return std::system(cmd.c_str());
+  }
+
   void prepare_for_stream() {
     if (config::video.linux_display.stream_mode == "headless_dongle" ||
         config::video.linux_display.stream_mode.empty()) {
@@ -276,23 +303,52 @@ namespace display_topology {
                          << "] not found in sysfs; attempting kscreen enable anyway"sv;
     }
 
-    // timeout guards against kscreen-doctor hangs observed on some hosts.
-    std::string cmd = "timeout 8 kscreen-doctor output." + cfg.streaming_output + ".enable";
-    if (privacy && distinct) {
-      cmd += " output." + cfg.streaming_output + ".priority.1";
-      cmd += " output." + cfg.primary_output + ".disable";
-    }
-    else if (distinct) {
-      cmd += " output." + cfg.primary_output + ".priority.1";
-      cmd += " output." + cfg.streaming_output + ".priority.2";
-    }
-
-    BOOST_LOG(info) << "display_topology: prepare ["sv << cmd << "]"sv;
-    const int ret = std::system(cmd.c_str());
+    // Staged prepare: enable dongle first and let KWin enumerate it before
+    // blanking the desk. Atomic enable+disable races to "There are no outputs"
+    // and KDE ScreenCast Start hangs on a placeholder 0x0 screen.
+    int ret = run_kscreen("output." + cfg.streaming_output + ".enable");
     if (ret != 0) {
-      BOOST_LOG(error) << "display_topology: prepare failed code="sv << ret;
+      BOOST_LOG(error) << "display_topology: enable streaming output failed code="sv << ret;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+    if (privacy && distinct) {
+      ret = run_kscreen("output." + cfg.streaming_output + ".priority.1");
+      if (ret != 0) {
+        BOOST_LOG(error) << "display_topology: set streaming priority failed code="sv << ret;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+      // Portal capture on host KDE needs either a saved restore token (auto Start)
+      // or a visible desk for the one-time ScreenCast picker. Blanking without a
+      // token guarantees no video.
+      const bool portal_capture = config::video.capture.empty() ||
+                                  config::video.capture == "auto" ||
+                                  config::video.capture == "portal";
+      const bool blank_primary = !portal_capture || host_portal_restore_token_present();
+      if (blank_primary) {
+        ret = run_kscreen("output." + cfg.primary_output + ".disable");
+        if (ret != 0) {
+          BOOST_LOG(error) << "display_topology: disable primary failed code="sv << ret
+                           << " (KDE may refuse if streaming output is not yet active)"sv;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+      }
+      else {
+        BOOST_LOG(warning)
+          << "display_topology: bootstrap — keeping primary ["sv << cfg.primary_output
+          << "] enabled so host ScreenCast picker is visible; approve once to save "
+             "portal_restore_token_host.txt, then privacy blanking activates"sv;
+      }
+    }
+    else if (distinct) {
+      ret = run_kscreen("output." + cfg.primary_output + ".priority.1 output." +
+                        cfg.streaming_output + ".priority.2");
+      if (ret != 0) {
+        BOOST_LOG(error) << "display_topology: extended layout failed code="sv << ret;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
   }
 
   void restore_after_stream() {
@@ -307,22 +363,20 @@ namespace display_topology {
       return;
     }
 
-    std::string cmd = "timeout 8 kscreen-doctor";
+    std::string args;
     if (privacy && distinct) {
-      cmd += " output." + cfg.primary_output + ".enable";
-      cmd += " output." + cfg.primary_output + ".priority.1";
-      cmd += " output." + cfg.streaming_output + ".disable";
+      args = "output." + cfg.primary_output + ".enable output." + cfg.primary_output +
+             ".priority.1 output." + cfg.streaming_output + ".disable";
     }
     else {
       if (distinct) {
-        cmd += " output." + cfg.primary_output + ".priority.1";
+        args = "output." + cfg.primary_output + ".priority.1 ";
       }
-      cmd += " output." + cfg.streaming_output + ".priority.2";
-      cmd += " output." + cfg.streaming_output + ".disable";
+      args += "output." + cfg.streaming_output + ".priority.2 output." +
+              cfg.streaming_output + ".disable";
     }
 
-    BOOST_LOG(info) << "display_topology: restore ["sv << cmd << "]"sv;
-    const int ret = std::system(cmd.c_str());
+    const int ret = run_kscreen(args);
     if (ret != 0) {
       BOOST_LOG(error) << "display_topology: restore failed code="sv << ret;
     }
