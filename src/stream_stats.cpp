@@ -186,6 +186,7 @@ namespace stream_stats {
     j["encode_target_device"] = encode_target_device;
     j["encode_target_residency"] = platf::from_frame_residency(encode_target_residency);
     j["encode_target_format"] = platf::from_frame_format(encode_target_format);
+    j["convert_path"] = encode_target_device.empty() ? "unknown" : encode_target_device;
     j["dynamic_range"] = dynamic_range;
     j["display_hdr"] = display_hdr;
     j["hdr_metadata_available"] = hdr_metadata_available;
