@@ -113,6 +113,22 @@ TEST(AudioSinkSelectionTest, SelectsHostSinkWhenHostAudioIsEnabled) {
   config::audio.sink = old_sink;
 }
 
+TEST(AudioSinkSelectionTest, CapturesEasyEffectsInsteadOfVirtualIsolation) {
+  auto old_sink = config::audio.sink;
+  config::audio.sink.clear();
+  auto ctx = make_sink_context();
+  ctx.sink.host = "easyeffects_sink";
+
+  const auto sink = audio::select_sink_name(ctx, 6, false);
+
+  EXPECT_EQ(sink, "easyeffects_sink");
+  EXPECT_TRUE(audio::host_sink_is_processing(ctx.sink.host));
+  EXPECT_FALSE(audio::sink_is_virtual(ctx, sink));
+  EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, false));
+
+  config::audio.sink = old_sink;
+}
+
 TEST(AudioSinkSelectionTest, ExplicitConfiguredSinkKeepsDefaultRoutingBehavior) {
   auto old_sink = config::audio.sink;
   config::audio.sink = "alsa_output.configured";

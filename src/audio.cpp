@@ -288,14 +288,37 @@ namespace audio {
     return control_shared.ref();
   }
 
+  bool host_sink_is_processing(const std::string &sink_name) {
+    if (sink_name.empty()) {
+      return false;
+    }
+    // Match node names used by common PipeWire filter graphs. These sinks
+    // advertise themselves as the default and set target.object on clients;
+    // pa_context_move_sink_input cannot keep FMOD/Wine off them.
+    auto contains = [&](const char *needle) {
+      return sink_name.find(needle) != std::string::npos;
+    };
+    return contains("easyeffects") || contains("EasyEffects") ||
+           contains("jamesdsp") || contains("JamesDSP") ||
+           contains("pulseeffects") || contains("PulseEffects");
+  }
+
   std::string select_sink_name(const audio_ctx_t &ctx, int channels, bool host_audio) {
     // Order of priority:
-    // 1. Virtual sink, when host playback is disabled or no host sink exists
-    // 2. Explicit audio sink
-    // 3. Host/default sink
+    // 1. Host processing sink (EasyEffects etc.) — games rebind there after menu
+    //    device reinit; virtual isolation + re-pin loses → silent Moonlight audio
+    // 2. Virtual sink, when host playback is disabled or no host sink exists
+    // 3. Explicit audio sink
+    // 4. Host/default sink
     std::string sink = config::audio.sink.empty() ? ctx.sink.host : config::audio.sink;
 
     if (ctx.sink.null && (!host_audio || sink.empty())) {
+      if (!host_audio && host_sink_is_processing(ctx.sink.host)) {
+        BOOST_LOG(info) << "Linux audio: host default ["sv << ctx.sink.host
+                        << "] is a processing sink; capturing it instead of virtual isolation "
+                           "(FMOD/EasyEffects target.object cannot be overridden by re-pin)"sv;
+        return ctx.sink.host;
+      }
       const auto &null = *ctx.sink.null;
       switch (channels) {
         case 6:
@@ -320,6 +343,10 @@ namespace audio {
 
   bool should_route_session_sink_without_default(const audio_ctx_t &ctx, const std::string &sink, bool host_audio) {
 #ifdef __linux__
+    // Never thrash re-pin against EasyEffects — capture host instead (select_sink_name).
+    if (host_sink_is_processing(ctx.sink.host) || host_sink_is_processing(sink)) {
+      return false;
+    }
     return !host_audio && config::audio.sink.empty() && sink_is_virtual(ctx, sink);
 #else
     return false;
