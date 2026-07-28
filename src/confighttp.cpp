@@ -51,6 +51,7 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
+#include "rtsp.h"
 #include "session_event_queue.h"
 #include "stream_recorder.h"
 #include "stream_stats.h"
@@ -392,14 +393,57 @@ namespace confighttp {
         }
       }
 
-      // 2) Gamescope (owned or idle attach) — portal streams this socket
+      // 2) Gamescope (owned or idle attach) — grim/wlr-screencopy is NOT
+      // supported on gamescope ("compositor doesn't support the screen capture
+      // protocol"). Use gamescopectl screenshot (async write to path).
+      auto try_gamescope_screenshot = [&](const std::string &socket_name) {
+        if (socket_name.empty()) {
+          return false;
+        }
+        const auto sock_path = xdg + "/" + socket_name;
+        if (access(sock_path.c_str(), F_OK) != 0) {
+          return false;
+        }
+        // Remove stale target so we can detect a new write.
+        std::remove(outfile.c_str());
+        const std::string env =
+          "GAMESCOPE_WAYLAND_DISPLAY=" + shell_escape(socket_name) +
+          " WAYLAND_DISPLAY=" + shell_escape(socket_name) +
+          " XDG_RUNTIME_DIR=" + shell_escape(xdg) + " ";
+        // Nudge a frame then screenshot (async write inside gamescope).
+        std::system((env + "gamescopectl debug_force_repaint >/dev/null 2>&1").c_str());
+        std::ostringstream cmd;
+        cmd << env << "gamescopectl screenshot " << shell_escape(outfile)
+            << " >/dev/null 2>&1";
+        if (std::system(cmd.c_str()) != 0) {
+          return false;
+        }
+        // Screenshot thread is async — wait briefly for the file.
+        for (int i = 0; i < 40; ++i) {
+          if (access(outfile.c_str(), R_OK) == 0) {
+            return true;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        return access(outfile.c_str(), R_OK) == 0;
+      };
+
       for (const char *gs : {"gamescope-0", "gamescope-1"}) {
+        if (try_gamescope_screenshot(gs)) {
+          used_backend = std::string("gamescopectl:") + gs;
+          return true;
+        }
+        // grim may still work on some nested/wlroots-compatible forks — try last.
         if (try_grim_socket(gs, "")) {
           used_backend = gs;
           return true;
         }
       }
       if (const char *gs_env = std::getenv("GAMESCOPE_WAYLAND_DISPLAY"); gs_env && *gs_env) {
+        if (try_gamescope_screenshot(gs_env)) {
+          used_backend = std::string("gamescopectl:") + gs_env;
+          return true;
+        }
         if (try_grim_socket(gs_env, "")) {
           used_backend = gs_env;
           return true;
@@ -3887,7 +3931,49 @@ namespace confighttp {
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       std::string uuid = input_tree.value("uuid", "");
-      output_tree["status"] = nvhttp::find_and_stop_session(uuid, true);
+
+      // Host-operator path: WebUI disconnect must fully end the stream (RTSP +
+      // app + path cleanup), not only stop one RTSP session by uuid.
+      // Moonlight cancel keeps ownership rules; Dashboard is force-stop.
+      bool stopped = false;
+      if (!uuid.empty()) {
+        const auto shutdown = proc::proc.request_session_shutdown(uuid, {}, true, false);
+        stopped = shutdown.stopped ||
+                  shutdown.snapshot.outcome == proc::session_stop_outcome_t::allowed ||
+                  shutdown.snapshot.outcome == proc::session_stop_outcome_t::no_active_session;
+        if (!stopped) {
+          // Owner/token mismatch or residual app: still force-end for operator.
+          BOOST_LOG(info) << "WebUI disconnect: force-stop after outcome="
+                          << static_cast<int>(shutdown.snapshot.outcome);
+          rtsp_stream::terminate_sessions();
+          proc::proc.terminate();
+          stopped = true;
+        }
+      }
+      else {
+        // No uuid: disconnect current active session(s).
+        const auto owner = proc::proc.get_session_owner_unique_id();
+        if (!owner.empty()) {
+          const auto shutdown = proc::proc.request_session_shutdown(owner, {}, true, false);
+          stopped = shutdown.stopped ||
+                    shutdown.snapshot.outcome == proc::session_stop_outcome_t::allowed ||
+                    shutdown.snapshot.outcome == proc::session_stop_outcome_t::no_active_session;
+        }
+        if (!stopped) {
+          rtsp_stream::terminate_sessions();
+          if (proc::proc.running() > 0) {
+            proc::proc.terminate();
+          }
+          stopped = true;
+        }
+      }
+      // Best-effort: also stop named client RTSP if still present.
+      if (!uuid.empty()) {
+        nvhttp::find_and_stop_session(uuid, true);
+      }
+
+      output_tree["status"] = stopped;
+      output_tree["force"] = true;
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Disconnect: "sv << e.what();

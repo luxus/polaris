@@ -122,7 +122,12 @@ namespace proc {
     if (requester_role == rtsp_stream::session_role_e::viewer) {
       return session_stop_outcome_t::viewer_forbidden;
     }
-    if (has_running_app && !owned_by_client) {
+    // Live RTSP controller may stop even if launch-owner uuid drifted (e.g.
+    // browser-stream handoff, residual app after client reconnect). Prefer
+    // controller role over strict launch-owner match so quit is not 470 while
+    // the stream still ends from process death.
+    if (has_running_app && !owned_by_client &&
+        requester_role != rtsp_stream::session_role_e::controller) {
       return session_stop_outcome_t::other_owner;
     }
     if (!has_running_app && requester_role != rtsp_stream::session_role_e::controller) {

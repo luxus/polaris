@@ -95,6 +95,12 @@ TEST(SessionStopContractTests, DifferentPairedClientCannotStopOwnedSession) {
   EXPECT_EQ(decide(true, true, 1, false, session_role_e::none), session_stop_outcome_t::other_owner);
 }
 
+TEST(SessionStopContractTests, LiveControllerCanStopEvenIfLaunchOwnerUuidDrifted) {
+  // SB-4: quit was 470 "another client" while stream still died. Controller of
+  // the live RTSP session may stop even when launch-owner unique_id drifted.
+  EXPECT_EQ(decide(true, true, 1, false, session_role_e::controller), session_stop_outcome_t::allowed);
+}
+
 TEST(SessionStopContractTests, DuplicateStopIsRejectedWhileStopIsInProgress) {
   EXPECT_EQ(
     decide(true, true, 1, true, session_role_e::controller, true),
