@@ -73,6 +73,7 @@
   #include "platform/windows/utils.h"
   #include <Windows.h>
 #elif __linux__
+  #include <sys/stat.h>
   #include <unistd.h>
 #elif __APPLE__
   #include <mach-o/dyld.h>
@@ -311,6 +312,9 @@ namespace confighttp {
 
 #ifdef __linux__
     constexpr auto PREVIEW_FAILURE_LOG_BACKOFF = std::chrono::seconds(60);
+    // Minimum PNG size that is unlikely to be an empty/stub write (IHDR + tiny body).
+    constexpr std::uintmax_t PREVIEW_MIN_BYTES = 256;
+    constexpr auto PREVIEW_CACHE_MAX_AGE = std::chrono::minutes(30);
 
     struct preview_failure_log_state_t {
       std::chrono::steady_clock::time_point last_log {};
@@ -325,6 +329,65 @@ namespace confighttp {
         return xdg;
       }
       return "/run/user/1000";
+    }
+
+    std::string preview_last_frame_cache_path() {
+      return preview_xdg_runtime_dir() + "/polaris-last-preview.png";
+    }
+
+    bool preview_file_usable(const std::string &path) {
+      std::error_code ec;
+      const auto size = std::filesystem::file_size(path, ec);
+      return !ec && size >= PREVIEW_MIN_BYTES;
+    }
+
+    void store_preview_last_frame(const std::string &src) {
+      if (!preview_file_usable(src)) {
+        return;
+      }
+      std::error_code ec;
+      std::filesystem::copy_file(
+        src,
+        preview_last_frame_cache_path(),
+        std::filesystem::copy_options::overwrite_existing,
+        ec
+      );
+      if (ec) {
+        BOOST_LOG(debug) << "display_preview: failed to update last-frame cache: "sv << ec.message();
+      }
+    }
+
+    bool try_preview_last_frame_cache(const std::string &outfile) {
+      const auto cache = preview_last_frame_cache_path();
+      std::error_code ec;
+      if (!preview_file_usable(cache)) {
+        return false;
+      }
+      // Prefer cache while a session is live (preview during/just after stream).
+      // Otherwise only serve if the file is still "fresh" by wall-clock mtime.
+      const auto state = get_session_state();
+      const bool stream_active =
+        state == "streaming" || state == "paused" || state == "game_launching" ||
+        state == "cage_starting" || state == "initializing" || state == "tearing_down" ||
+        proc::proc.running() > 0;
+      if (!stream_active) {
+        // Age via status_last_write_time is awkward across clocks; use st_mtime via stat.
+        struct stat st {};
+        if (stat(cache.c_str(), &st) != 0) {
+          return false;
+        }
+        const auto age = std::chrono::system_clock::now() - std::chrono::system_clock::from_time_t(st.st_mtime);
+        if (age > PREVIEW_CACHE_MAX_AGE) {
+          return false;
+        }
+      }
+      std::filesystem::copy_file(
+        cache,
+        outfile,
+        std::filesystem::copy_options::overwrite_existing,
+        ec
+      );
+      return !ec && preview_file_usable(outfile);
     }
 
     bool preview_output_is_safe(const std::string &value) {
@@ -365,7 +428,8 @@ namespace confighttp {
 
     /**
      * @brief Try preview capture for the active stream path (labwc / gamescope / host).
-     * @return true on success. Uses grim on Wayland sockets first; spectacle last.
+     * @return true on success. Prefer gamescopectl on gamescope (grim unsupported);
+     *         fall back to last successful stream frame cache.
      */
     bool try_stream_path_preview_capture(const std::string &requested_output,
                                          const std::string &outfile,
@@ -379,8 +443,12 @@ namespace confighttp {
         if (access(sock_path.c_str(), F_OK) != 0) {
           return false;
         }
+        std::remove(outfile.c_str());
         const auto cmd = build_cage_preview_capture_command(socket_name, output_name, outfile);
-        return std::system(cmd.c_str()) == 0;
+        if (std::system(cmd.c_str()) != 0) {
+          return false;
+        }
+        return preview_file_usable(outfile);
       };
 
       // 1) Owned labwc private runtime
@@ -389,13 +457,14 @@ namespace confighttp {
         const auto output = active_preview_output_name(requested_output);
         if (try_grim_socket(socket, output)) {
           used_backend = "labwc";
+          store_preview_last_frame(outfile);
           return true;
         }
       }
 
       // 2) Gamescope (owned or idle attach) — grim/wlr-screencopy is NOT
       // supported on gamescope ("compositor doesn't support the screen capture
-      // protocol"). Use gamescopectl screenshot (async write to path).
+      // protocol"). Prefer gamescopectl screenshot (async write to path).
       auto try_gamescope_screenshot = [&](const std::string &socket_name) {
         if (socket_name.empty()) {
           return false;
@@ -418,72 +487,136 @@ namespace confighttp {
         if (std::system(cmd.str().c_str()) != 0) {
           return false;
         }
-        // Screenshot thread is async — wait briefly for the file.
+        // Screenshot thread is async — wait briefly for a non-empty write.
         for (int i = 0; i < 40; ++i) {
-          if (access(outfile.c_str(), R_OK) == 0) {
+          if (preview_file_usable(outfile)) {
             return true;
           }
           std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        return access(outfile.c_str(), R_OK) == 0;
+        return preview_file_usable(outfile);
       };
 
       for (const char *gs : {"gamescope-0", "gamescope-1"}) {
         if (try_gamescope_screenshot(gs)) {
           used_backend = std::string("gamescopectl:") + gs;
+          store_preview_last_frame(outfile);
           return true;
         }
         // grim may still work on some nested/wlroots-compatible forks — try last.
         if (try_grim_socket(gs, "")) {
           used_backend = gs;
+          store_preview_last_frame(outfile);
           return true;
         }
       }
       if (const char *gs_env = std::getenv("GAMESCOPE_WAYLAND_DISPLAY"); gs_env && *gs_env) {
         if (try_gamescope_screenshot(gs_env)) {
           used_backend = std::string("gamescopectl:") + gs_env;
+          store_preview_last_frame(outfile);
           return true;
         }
         if (try_grim_socket(gs_env, "")) {
           used_backend = gs_env;
+          store_preview_last_frame(outfile);
           return true;
         }
       }
 
-      // 3) Host Wayland (Mirror Desktop / dongle desktop)
+      // 2b) Gamescope X11 nested surface (from polaris-hdr.env / DISPLAY) via ImageMagick.
+      // gamescopectl can fail idle (empty vulkan screenshot texture); X11 grab may still work mid-stream.
+      {
+        std::string x11_display;
+        const auto env_file = xdg + "/polaris-hdr.env";
+        if (std::ifstream env_in(env_file); env_in) {
+          std::string line;
+          while (std::getline(env_in, line)) {
+            if (line.rfind("DISPLAY=", 0) == 0) {
+              x11_display = line.substr(8);
+              break;
+            }
+          }
+        }
+        if (x11_display.empty()) {
+          if (const char *d = std::getenv("DISPLAY"); d && *d) {
+            x11_display = d;
+          }
+        }
+        if (!x11_display.empty() && preview_output_is_safe(x11_display)) {
+          std::remove(outfile.c_str());
+          // Prefer magick import (IM7), fall back to import.
+          const std::string magick_cmd =
+            "DISPLAY=" + shell_escape(x11_display) +
+            " magick import -window root " + shell_escape(outfile) + " 2>/dev/null";
+          const std::string import_cmd =
+            "DISPLAY=" + shell_escape(x11_display) +
+            " import -window root " + shell_escape(outfile) + " 2>/dev/null";
+          if (std::system(magick_cmd.c_str()) == 0 && preview_file_usable(outfile)) {
+            used_backend = std::string("x11:") + x11_display;
+            store_preview_last_frame(outfile);
+            return true;
+          }
+          if (std::system(import_cmd.c_str()) == 0 && preview_file_usable(outfile)) {
+            used_backend = std::string("x11:") + x11_display;
+            store_preview_last_frame(outfile);
+            return true;
+          }
+        }
+      }
+
+      // 3) Host Wayland (Mirror Desktop / dongle desktop) — skip gamescope sockets
+      // already handled above (grim unsupported there).
       if (const char *wl = std::getenv("WAYLAND_DISPLAY"); wl && *wl) {
-        std::string out_name = requested_output;
-        if (out_name.empty() && !config::video.linux_display.streaming_output.empty() &&
-            config::video.linux_display.stream_mode == "headless_dongle") {
-          out_name = config::video.linux_display.streaming_output;
-        }
-        if (try_grim_socket(wl, out_name)) {
-          used_backend = std::string("host:") + wl;
-          return true;
-        }
-        // grim without -o
-        if (try_grim_socket(wl, "")) {
-          used_backend = std::string("host:") + wl;
-          return true;
+        const std::string wl_s {wl};
+        const bool is_gamescope =
+          wl_s == "gamescope-0" || wl_s == "gamescope-1" ||
+          wl_s.rfind("gamescope-", 0) == 0;
+        if (!is_gamescope) {
+          std::string out_name = requested_output;
+          if (out_name.empty() && !config::video.linux_display.streaming_output.empty() &&
+              config::video.linux_display.stream_mode == "headless_dongle") {
+            out_name = config::video.linux_display.streaming_output;
+          }
+          if (try_grim_socket(wl_s, out_name)) {
+            used_backend = std::string("host:") + wl_s;
+            store_preview_last_frame(outfile);
+            return true;
+          }
+          // grim without -o
+          if (try_grim_socket(wl_s, "")) {
+            used_backend = std::string("host:") + wl_s;
+            store_preview_last_frame(outfile);
+            return true;
+          }
         }
       }
 
       // 4) Host X11 / spectacle last resort
       {
+        std::remove(outfile.c_str());
         const std::string cmd = "spectacle -b -n -o " + shell_escape(outfile) + " 2>/dev/null";
-        if (std::system(cmd.c_str()) == 0) {
+        if (std::system(cmd.c_str()) == 0 && preview_file_usable(outfile)) {
           used_backend = "spectacle";
+          store_preview_last_frame(outfile);
           return true;
         }
       }
 
       // 5) grim on default session without explicit socket (some hosts)
       {
+        std::remove(outfile.c_str());
         const std::string cmd = "grim " + shell_escape(outfile) + " 2>/dev/null";
-        if (std::system(cmd.c_str()) == 0) {
+        if (std::system(cmd.c_str()) == 0 && preview_file_usable(outfile)) {
           used_backend = "grim";
+          store_preview_last_frame(outfile);
           return true;
         }
+      }
+
+      // 6) Last successful stream/preview frame (SB-1: gamescopectl idle often fails)
+      if (try_preview_last_frame_cache(outfile)) {
+        used_backend = "last_frame_cache";
+        return true;
       }
 
       used_backend = "none";
@@ -4216,7 +4349,7 @@ namespace confighttp {
     if (!captured) {
       nlohmann::json err;
       err["status"] = false;
-      err["error"] = "Screenshot capture failed for the active stream path (tried labwc, gamescope, host Wayland, spectacle/grim)";
+      err["error"] = "Screenshot capture failed for the active stream path (tried gamescopectl, labwc grim, host Wayland, last-frame cache, spectacle)";
       err["preview_backend"] = preview_backend;
       send_response(response, err);
       return;

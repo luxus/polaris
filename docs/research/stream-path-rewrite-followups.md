@@ -8,12 +8,12 @@
 
 | SB | Status | Notes |
 |----|--------|--------|
-| #1 Preview | **In progress** | Code uses `gamescopectl screenshot` (grim unsupported). Idle headless still fails to write PNG (vulkan screenshot texture). Needs PipeWire one-shot or last-stream-frame cache. |
-| #2 Clean stop / RST | Open | Code path not fully verified post-deploy; use browser stream + client End |
+| #1 Preview | **Code landed** | `gamescopectl` first (grim unsupported on gamescope); reject empty PNG; X11 import from `polaris-hdr.env` DISPLAY; last-frame cache at `$XDG_RUNTIME_DIR/polaris-last-preview.png`. Idle headless may still need live content or cache from prior stream. |
+| #2 Clean stop / RST | **Code landed** | `rtsp clear`/`terminate_sessions` uses `graceful_stop` + short flush before `join` (control terminate before socket teardown). Needs post-deploy Moonlight/browser smoke. |
 | #3 WebUI disconnect | **Code landed** | Force `request_session_shutdown` + terminate; needs smoke with password |
 | #4 Cancel 470 | **Code landed** | Live RTSP controller can stop if owner uuid drifted; unit test added |
-| #5 Mode-agnostic apps | **Inject mode-aware** | luxusAi: wire library games only for gamescope_stream / portal-without-cage; else unwrap to steam-appid |
-| #6 Smoke harness | **Script landed** | `scripts/solid-base-smoke.sh` — browser stream preferred; needs `POLARIS_PASSWORD` |
+| #5 Mode-agnostic apps | **Inject mode-aware** | luxusAi: wire library games only for gamescope_stream / portal-without-cage; else unwrap to steam-appid. Polaris import stays steam-appid neutral. |
+| #6 Smoke harness | **Script landed** | `scripts/solid-base-smoke.sh` + `solid-base-gate.sh` — browser stream preferred; needs `POLARIS_PASSWORD` |
 
 **Test preference (approved):** Browser Stream API for agent smoke.
 
@@ -70,12 +70,15 @@ Related product docs:
 | SB-4 | https://github.com/luxus/polaris/issues/4 | Cancel 470 “another client” while quit works |
 | SB-5 | https://github.com/luxus/polaris/issues/5 | Mode-agnostic Steam import (no polaris-hdr-session hardwire) |
 | SB-6 | https://github.com/luxus/polaris/issues/6 | Headless smoke harness |
+| SB-7 | https://github.com/luxus/polaris/issues/7 | Private portal units NameTaken / inactive after boot+stream |
 
 **Agent smoke preference:** **Browser Stream** (`/api/browser-stream/status|session/start|stop`) — same runtime/capture stack, no phone. Moonlight `/cancel` still required for SB-4/RST.
 
+**Stabilize workflow:** [`solid-base-workflow.md`](./solid-base-workflow.md) — gate script, pin/deploy path, Grok workflow `solid-base-stabilize`.
+
 ## 3. Live lea bugs (observed during rewrite testing)
 
-These are **host/runtime regressions or unfinished cleanup**. Fix under SB-1…SB-6 before claiming gamescope_stream solid.
+These are **host/runtime regressions or unfinished cleanup**. Fix under SB-1…SB-7 before claiming gamescope_stream solid.
 
 ### 3.1 First stream start: crash / flaky open
 
@@ -121,7 +124,7 @@ All Steam imports: `polaris-hdr-session start|wait`. Mode switches need manual a
 
 ## 4. Rewrite deliverables still open
 
-- [ ] SB-1…SB-6 closed / verified
+- [ ] SB-1…SB-7 closed / verified
 - [ ] Owned `gamescope_stream` start/wait/stop + attach-idle
 - [ ] Dongle auto-detect polish
 - [ ] E2E labwc / gamescope / dongle
