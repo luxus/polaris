@@ -22,6 +22,7 @@ starts at `v1.0.0`.
 - Dongle path: DRM sysfs connector discovery + `/api/linux/display-outputs` with auto-suggest; apply auto-fills empty outputs.
 - Gamescope runtime: attach idle `gamescope-0` first (start `polaris-hdr-idle` if needed); never use `gamescope-1` for portal.
 - Solid-base stop path: Moonlight `/cancel` responds before nested teardown; owner cancel ignores stale sessiontoken (case-insensitive UUID); portal PipeWire disconnect under loop lock; gamescope path launches stock steam-appid detached via runtime wrap (mode-agnostic imports).
+- Portal restore token: keep enabled; on SelectSources failure invalidate the saved token and retry once without it, then save a fresh token. Wait briefly for `AvailableCursorModes` ≠ 0 before omitting cursor. Release portal/PipeWire capture before nested compositor kill (SB-2 SEGV).
 
 ## v1.3.1 - 2026-07-12
 

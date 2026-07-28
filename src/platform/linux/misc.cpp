@@ -607,8 +607,20 @@ std::string get_local_ip_for_gateway() {
     // Nothing to do
   }
 
+#ifdef POLARIS_BUILD_PORTAL
+  // Defined in portal_grab.cpp — tear down global ScreenCast/PipeWire capture.
+  namespace portal {
+    void release_global_capture();
+  }
+#endif
+
   void streaming_will_stop() {
-    // Nothing to do
+#ifdef POLARIS_BUILD_PORTAL
+    // SB-2: drop PipeWire + ScreenCast session while the compositor is still
+    // alive. Video threads have already joined; releasing here keeps gamescope
+    // kill (owned path) from racing a live portal source.
+    portal::release_global_capture();
+#endif
   }
 
   void restart_on_exit() {

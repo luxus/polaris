@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <condition_variable>
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <mutex>
@@ -75,6 +76,23 @@ namespace portal {
     std::ofstream f(token_path());
     f << token;
     BOOST_LOG(info) << "portal: Saved restore token for future sessions"sv;
+  }
+
+  // Invalidate a bad/stale restore token so the next SelectSources can re-prompt
+  // (or auto-select after Start returns a fresh token). Do not permanently
+  // disable restore tokens — only clear the on-disk cache on failure.
+  static void clear_restore_token() {
+    const auto path = token_path();
+    std::error_code ec;
+    if (std::filesystem::remove(path, ec)) {
+      BOOST_LOG(warning) << "portal: Cleared invalid restore token at "sv << path;
+    }
+    else if (ec && ec != std::errc::no_such_file_or_directory) {
+      BOOST_LOG(warning) << "portal: Failed to clear restore token "sv << path
+                         << ": "sv << ec.message();
+      // Best-effort truncate so a subsequent load returns empty.
+      std::ofstream f(path, std::ios::trunc);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -254,6 +272,33 @@ namespace portal {
     return 0;
   }
 
+#if defined(POLARIS_TESTS)
+  uint32_t portal_pick_cursor_mode_for_tests(uint32_t available) {
+    return portal_pick_cursor_mode(available);
+  }
+#endif
+
+  // gamescope portal often reports AvailableCursorModes=0 until it rebinds to a
+  // live compositor. Prefer waiting for a non-zero bitmask rather than always
+  // omitting cursor_mode (which works but loses embedded cursors).
+  static uint32_t portal_wait_cursor_modes(GDBusConnection *conn, int timeout_ms = 2000) {
+    uint32_t modes = portal_available_cursor_modes(conn);
+    if (modes != 0 || timeout_ms <= 0) {
+      return modes;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(100ms);
+      modes = portal_available_cursor_modes(conn);
+      if (modes != 0) {
+        BOOST_LOG(info) << "portal: AvailableCursorModes became "sv << modes
+                        << " after wait"sv;
+        return modes;
+      }
+    }
+    return modes;
+  }
+
   // Helper: wait for a Response signal on a request path.
   // Uses a dedicated GMainLoop thread to ensure D-Bus signals are delivered.
   static GVariant *wait_for_response(GDBusConnection *conn, const std::string &request_path,
@@ -389,62 +434,84 @@ namespace portal {
     }
 
     // Step 2: SelectSources
+    // Keep restore_token enabled for headless auto-select. On failure
+    // (InvalidArgument / stale token / timeout): clear the saved token and
+    // retry SelectSources once without it; Start will persist a fresh token.
     BOOST_LOG(info) << "portal: Selecting sources (type="sv << capture_type << ")..."sv;
     {
-      std::string req_path = make_request_path(session->conn, "polaris_req2");
+      auto try_select_sources = [&](const char *handle_token, bool use_restore_token) -> GVariant * {
+        const uint32_t available_cursor = portal_wait_cursor_modes(session->conn);
+        const uint32_t cursor_mode = portal_pick_cursor_mode(available_cursor);
+        BOOST_LOG(info) << "portal: AvailableCursorModes="sv << available_cursor
+                        << " selected_cursor_mode="sv << cursor_mode
+                        << (cursor_mode == 0 ? " (omit — portal reports none)" : "")
+                        << " restore_token="sv << (use_restore_token ? "yes" : "no") << ""sv;
 
-      const uint32_t available_cursor = portal_available_cursor_modes(session->conn);
-      const uint32_t cursor_mode = portal_pick_cursor_mode(available_cursor);
-      BOOST_LOG(info) << "portal: AvailableCursorModes="sv << available_cursor
-                      << " selected_cursor_mode="sv << cursor_mode
-                      << (cursor_mode == 0 ? " (omit — portal reports none)" : "") << ""sv;
-
-      GVariantBuilder builder;
-      g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
-      g_variant_builder_add(&builder, "{sv}", "types",
-        g_variant_new_uint32(capture_type));
-      // Only request a cursor mode the portal advertises. Hardcoding Embedded (2)
-      // fails with InvalidArgument when AvailableCursorModes is 0 (cold portal /
-      // gamescope not bound yet) and leaves Moonlight stuck in handshake.
-      if (cursor_mode != 0) {
-        g_variant_builder_add(&builder, "{sv}", "cursor_mode",
-          g_variant_new_uint32(cursor_mode));
-      }
-      g_variant_builder_add(&builder, "{sv}", "persist_mode",
-        g_variant_new_uint32(2));
-      g_variant_builder_add(&builder, "{sv}", "handle_token",
-        g_variant_new_string("polaris_req2"));
-
-      auto saved_token = load_restore_token();
-      if (!saved_token.empty()) {
-        BOOST_LOG(info) << "portal: Using saved restore token (auto-select)"sv;
-        g_variant_builder_add(&builder, "{sv}", "restore_token",
-          g_variant_new_string(saved_token.c_str()));
-      }
-
-      auto *result = portal_call_sync(session->conn, "SelectSources",
-        g_variant_new("(oa{sv})", session->session_handle.c_str(), &builder));
-      if (result) g_variant_unref(result);
-
-      auto *resp = wait_for_response(session->conn, req_path, 10000);
-      if (!resp) {
-        // Retry once without restore_token / cursor if first SelectSources hung
-        // (stale token or modes still settling after portal restart).
-        BOOST_LOG(warning) << "portal: SelectSources response missing — retry without restore_token"sv;
-        req_path = make_request_path(session->conn, "polaris_req2b");
-        GVariantBuilder b2;
-        g_variant_builder_init(&b2, G_VARIANT_TYPE("a{sv}"));
-        g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(capture_type));
+        std::string req_path = make_request_path(session->conn, handle_token);
+        GVariantBuilder builder;
+        g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_add(&builder, "{sv}", "types",
+          g_variant_new_uint32(capture_type));
+        // Only request a cursor mode the portal advertises. Hardcoding Embedded (2)
+        // fails with InvalidArgument when AvailableCursorModes is 0 (cold portal /
+        // gamescope not bound yet) and leaves Moonlight stuck in handshake.
         if (cursor_mode != 0) {
-          g_variant_builder_add(&b2, "{sv}", "cursor_mode", g_variant_new_uint32(cursor_mode));
+          g_variant_builder_add(&builder, "{sv}", "cursor_mode",
+            g_variant_new_uint32(cursor_mode));
         }
-        g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("polaris_req2b"));
-        auto *r2 = portal_call_sync(session->conn, "SelectSources",
-          g_variant_new("(oa{sv})", session->session_handle.c_str(), &b2));
-        if (r2) {
-          g_variant_unref(r2);
+        // Always request persist so Start can return a new restore_token after
+        // an invalidate+retry path re-selects without the old token.
+        g_variant_builder_add(&builder, "{sv}", "persist_mode",
+          g_variant_new_uint32(2));
+        g_variant_builder_add(&builder, "{sv}", "handle_token",
+          g_variant_new_string(handle_token));
+
+        std::string saved_token;
+        if (use_restore_token) {
+          saved_token = load_restore_token();
+          if (!saved_token.empty()) {
+            BOOST_LOG(info) << "portal: Using saved restore token (auto-select)"sv;
+            g_variant_builder_add(&builder, "{sv}", "restore_token",
+              g_variant_new_string(saved_token.c_str()));
+          }
         }
-        resp = wait_for_response(session->conn, req_path, 10000);
+
+        auto *result = portal_call_sync(session->conn, "SelectSources",
+          g_variant_new("(oa{sv})", session->session_handle.c_str(), &builder));
+        if (!result) {
+          // InvalidArgument / failed restore often fails the method call itself
+          // (no Response signal). Treat as SelectSources failure immediately.
+          BOOST_LOG(warning) << "portal: SelectSources D-Bus call failed"
+                             << (use_restore_token && !saved_token.empty() ?
+                                   " (restore token or cursor mode rejected)" :
+                                   "")
+                             << ""sv;
+          return nullptr;
+        }
+        g_variant_unref(result);
+
+        auto *resp = wait_for_response(session->conn, req_path, 10000);
+        if (!resp) {
+          BOOST_LOG(warning) << "portal: SelectSources response missing or non-zero"
+                             << (use_restore_token && !saved_token.empty() ?
+                                   " (stale restore token likely)" :
+                                   "")
+                             << ""sv;
+        }
+        return resp;
+      };
+
+      const bool had_saved_token = !load_restore_token().empty();
+      auto *resp = try_select_sources("polaris_req2", true);
+      if (!resp) {
+        // Policy: always invalidate the on-disk token after SelectSources
+        // failure, then retry once without restore_token. Cursor is re-queried
+        // on the retry so a late portal rebind can advertise modes ≠ 0.
+        if (had_saved_token) {
+          clear_restore_token();
+        }
+        BOOST_LOG(warning) << "portal: SelectSources failed — retry once without restore_token"sv;
+        resp = try_select_sources("polaris_req2b", false);
         if (!resp) {
           session->failed = true;
           return session;
@@ -1029,11 +1096,34 @@ namespace portal {
   // Created once (with window picker), reused for all subsequent streams.
   // -----------------------------------------------------------------------
 
+  static std::mutex g_portal_mu;
   static std::unique_ptr<portal_session_t> g_portal;
   static std::unique_ptr<pw_capture_t> g_capture;
   static uint32_t g_node_id = 0;
 
-  static bool ensure_global_session() {
+  // SB-2: release PipeWire + portal Session *before* gamescope/labwc is killed.
+  // Holding a live PW stream into a dying compositor SEGV's gamescope
+  // (CVulkanDevice dtor) and occasionally polaris itself.
+  void release_global_capture() {
+    std::unique_ptr<pw_capture_t> capture;
+    std::unique_ptr<portal_session_t> portal;
+    {
+      std::lock_guard lock(g_portal_mu);
+      if (!g_capture && !g_portal) {
+        return;
+      }
+      BOOST_LOG(info) << "portal: Releasing capture/session for stream teardown"sv;
+      capture = std::move(g_capture);
+      portal = std::move(g_portal);
+      g_node_id = 0;
+    }
+    // Destructors outside the mutex: PW loop stop can take a moment and must
+    // not serialize against a concurrent re-acquire on the next stream.
+    capture.reset();
+    portal.reset();
+  }
+
+  static bool ensure_global_session_unlocked() {
     // Create the portal D-Bus session once (shows picker on first use)
     if (!g_portal || !g_portal->ready || g_portal->pw_node_id == 0) {
       g_portal.reset();
@@ -1049,34 +1139,45 @@ namespace portal {
     return true;
   }
 
+  static bool ensure_global_session() {
+    std::lock_guard lock(g_portal_mu);
+    return ensure_global_session_unlocked();
+  }
+
   static pw_capture_t *ensure_global_capture(int width, int height) {
-    // If capture is running and healthy, reuse it
-    if (g_capture && g_capture->running) {
-      return g_capture.get();
+    pw_capture_t *cap = nullptr;
+    {
+      std::lock_guard lock(g_portal_mu);
+      // If capture is running and healthy, reuse it
+      if (g_capture && g_capture->running) {
+        return g_capture.get();
+      }
+
+      // PipeWire stream died or never created — need a fresh portal session
+      // because the old PipeWire node is no longer valid after disconnect
+      g_capture.reset();
+      g_portal.reset();
+      g_node_id = 0;
+
+      if (!ensure_global_session_unlocked()) {
+        return nullptr;
+      }
+
+      g_capture = start_pw_capture(g_node_id, width, height);
+      if (!g_capture) {
+        BOOST_LOG(warning) << "portal: Failed to start PipeWire capture"sv;
+        return nullptr;
+      }
+      cap = g_capture.get();
     }
 
-    // PipeWire stream died or never created — need a fresh portal session
-    // because the old PipeWire node is no longer valid after disconnect
-    g_capture.reset();
-    g_portal.reset();
-    g_node_id = 0;
-
-    if (!ensure_global_session()) {
-      return nullptr;
-    }
-
-    g_capture = start_pw_capture(g_node_id, width, height);
-    if (!g_capture) {
-      BOOST_LOG(warning) << "portal: Failed to start PipeWire capture"sv;
-      return nullptr;
-    }
-
-    // Wait for format negotiation
-    for (int i = 0; i < 100 && !g_capture->negotiated; ++i) {
+    // Format negotiation outside the mutex so release_global_capture can run.
+    for (int i = 0; i < 100 && cap && !cap->negotiated; ++i) {
       std::this_thread::sleep_for(100ms);
     }
 
-    return g_capture.get();
+    std::lock_guard lock(g_portal_mu);
+    return (g_capture && g_capture.get() == cap) ? g_capture.get() : nullptr;
   }
 
   // -----------------------------------------------------------------------

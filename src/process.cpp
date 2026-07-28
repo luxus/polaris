@@ -79,6 +79,12 @@
   #include <sys/stat.h>
   #include <sys/syscall.h>
   #include <unistd.h>
+  #ifdef POLARIS_BUILD_PORTAL
+  // portal_grab.cpp — release ScreenCast/PipeWire before nested compositor kill.
+  namespace portal {
+    void release_global_capture();
+  }
+  #endif
 #elif __APPLE__
   #include <mach-o/dyld.h>
 #endif
@@ -6048,6 +6054,12 @@ namespace proc {
     placebo = false;
 
 #ifdef __linux__
+    // SB-2: release portal/PipeWire capture *before* Steam/cage/gamescope kill.
+    // streaming_will_stop also does this after RTSP join; belt-and-suspenders for
+    // terminate paths that skip session join or race host quit.
+#ifdef POLARIS_BUILD_PORTAL
+    portal::release_global_capture();
+#endif
     stop_steam_big_picture_input_guard();
     if (!immediate) {
       terminate_session_owned_steam_before_cage_stop();

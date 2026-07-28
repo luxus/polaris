@@ -254,7 +254,19 @@ Or run the full orchestrator when several SBs are open:
 
 ---
 
-## 9. Anti-patterns (learned the hard way)
+## 9. Portal restore token + cursor modes
+
+| Item | Policy |
+|------|--------|
+| **Restore token** (`portal_restore_token.txt`) | **Keep enabled** — headless auto-select without picker |
+| **Do not** permanently disable tokens | Worse UX for GameStream |
+| **On SelectSources failure** | Invalidate saved token and retry once without it; save new token on success |
+| **Cursor mode** | Query `AvailableCursorModes`; pick Embedded→Metadata→Hidden; omit if 0 (client-correct) |
+| **Root fix** | Portal must advertise modes ≠ 0 once gamescope control is live (host bind order / rebind) — not “omit forever” |
+
+Workflow `solid-base-stabilize` residual phases encode this policy.
+
+## 10. Anti-patterns (learned the hard way)
 
 | Don’t | Do |
 |-------|-----|
@@ -264,3 +276,4 @@ Or run the full orchestrator when several SBs are open:
 | X11 grab for gamescope preview | gamescopectl or portal/last-frame |
 | `find /nix/store` in smoke paths | Known store paths / nix shell packages only |
 | `nh` without `/run/wrappers/bin` | PATH prefix for setuid sudo |
+| Disable restore token to “fix” capture | Invalidate + retry; fix portal modes |

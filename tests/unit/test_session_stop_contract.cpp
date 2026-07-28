@@ -176,6 +176,33 @@ TEST(SessionStopContractTests, PortalPipeWireTeardownDisconnectsUnderLoopLock) {
   EXPECT_LT(disconnect, destroy);
 }
 
+TEST(SessionStopContractTests, PortalReleaseRunsBeforeNestedCompositorKill) {
+  // SB-2 residual: portal PW still attached when gamescope dies → host SEGV.
+  // terminate_impl must release portal capture before Steam/cage cleanup.
+  const auto source = read_source_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto start = source.find("void proc_t::terminate_impl(");
+  ASSERT_NE(start, std::string::npos);
+  const auto body = source.substr(start, 1200);
+  const auto release = body.find("portal::release_global_capture(");
+  const auto steam = body.find("terminate_session_owned_steam_before_cage_stop(");
+  const auto gen = body.find("terminate_isolated_session_generation(");
+  ASSERT_NE(release, std::string::npos);
+  ASSERT_NE(steam, std::string::npos);
+  ASSERT_NE(gen, std::string::npos);
+  EXPECT_LT(release, steam);
+  EXPECT_LT(release, gen);
+}
+
+TEST(SessionStopContractTests, StreamingWillStopReleasesPortalCapture) {
+  const auto source = read_source_for_contract("src/platform/linux/misc.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto start = source.find("void streaming_will_stop()");
+  ASSERT_NE(start, std::string::npos);
+  const auto body = source.substr(start, 400);
+  EXPECT_NE(body.find("portal::release_global_capture("), std::string::npos);
+}
+
 TEST(SessionStopContractTests, DuplicateStopIsRejectedWhileStopIsInProgress) {
   EXPECT_EQ(
     decide(true, true, 1, true, session_role_e::controller, true),
