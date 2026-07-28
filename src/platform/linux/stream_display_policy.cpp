@@ -374,8 +374,11 @@ namespace stream_display_policy {
       if (linux_display.headless_swap_mode.empty()) {
         linux_display.headless_swap_mode = "privacy";
       }
-      if (config::video.capture.empty() || config::video.capture == "portal") {
-        config::video.capture = "kms";
+      // Prefer portal on Wayland hosts: KMS needs CAP_SYS_ADMIN and returns an empty
+      // monitor list without it (lea). Portal ScreenCast after topology prepare is the
+      // working path once the portal lock-contract is fixed. Explicit capture=kms is kept.
+      if (config::video.capture.empty() || config::video.capture == "auto") {
+        config::video.capture = "portal";
       }
       if (config::video.output_name.empty()) {
         config::video.output_name = linux_display.streaming_output;
@@ -416,12 +419,11 @@ namespace stream_display_policy {
         else if (path->runtime == stream_path::runtime_kind_e::GAMESCOPE) {
           linux_display.private_runtime = std::string {k_runtime_gamescope};
         }
-        // headless_dongle must never ScreenCast: force KMS capture on load so a
-        // stale capture=portal (or empty auto) cannot open the wrong backend.
+        // headless_dongle: default to portal (host desktop after topology swap).
+        // Do not force KMS — without CAP_SYS_ADMIN encoder probe fails empty.
         if (path->id == stream_path::k_headless_dongle) {
-          if (config::video.capture.empty() || config::video.capture == "portal" ||
-              config::video.capture == "auto") {
-            config::video.capture = "kms";
+          if (config::video.capture.empty() || config::video.capture == "auto") {
+            config::video.capture = "portal";
           }
         }
         return;

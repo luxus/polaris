@@ -116,7 +116,8 @@ TEST(PortalGrabPolicyTests, HeadlessDongleNormalizeForcesKmsCapture) {
   const auto body = out.str();
   EXPECT_NE(body.find("normalize_config_from_load"), std::string::npos);
   EXPECT_NE(body.find("k_headless_dongle"), std::string::npos);
-  EXPECT_NE(body.find("capture = \"kms\""), std::string::npos);
+  // Dongle defaults to portal (host ScreenCast); explicit kms still allowed.
+  EXPECT_NE(body.find("capture = \"portal\""), std::string::npos);
 }
 
 TEST(PipeWireCapturePolicyTests, MapsSupportedSpaFormatsToDrmFormats) {
