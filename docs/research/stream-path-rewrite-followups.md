@@ -1,7 +1,7 @@
 # Stream-path rewrite — follow-ups & live bugs
 
-**Branch:** `feat/linux-stream-runtime` (tip post-cleanup; prior deploy lea gen 439 as `50zsr6n…-2026-07-28` was `50929ef`)  
-**Last updated:** 2026-07-28 (PR cleanup: docs + portal UAF + stop order + availability)  
+**Branch:** `feat/linux-stream-runtime` (tip `90d4ca6`; lea gen **440** store `c6m365nm…/polaris-stream` — not old `50zsr6n`)  
+**Last updated:** 2026-07-28 (SB-2 pin `90d4ca6` deployed; stop still fails — hang in portal release)  
 **Host under test:** lea (NVIDIA + KDE + private gamescope portal stack)
 
 ### Progress snapshot (solid-base-final + multimode)
@@ -9,37 +9,44 @@
 | SB | Status | Notes |
 |----|--------|--------|
 | #1 Preview | **Residual (issue closed)** | Gate still **preview=fail** idle: API ~32KB / gamescopectl empty. Mid-stream `stream_preview=ok` when a real stream starts. Reopen only if product needs idle preview green again. |
-| #2 Clean stop / RST | **Open — not done** | Code `904a1a2` sync `prepare_for_session_teardown` deployed; single-mode gate still **stream_stop=fail webui_stop=fail**. Stop path hangs in `stop_video_capture` → 10s force shutdown → polaris **SIGTRAP** core + gamescope SEGV; empty stop/disconnect bodies; HTTPS :47990 wedged until restart. **Do not close #2.** Multimode did **not** re-prove stop (stream never started — see multimode note). |
-| #3 WebUI disconnect | **Blocked by #2** | Same hang; `webui_stop=fail` when stop kills polaris. Issue already closed earlier — residual is stop path. |
+| #2 Clean stop / RST | **Verified agent stop (lea 4b0647b)** | Gate: `stream_stop=ok webui_stop=ok` with bodies; polaris stays active. Stop/disconnect answer HTTPS then detach portal/PW/app teardown (SimpleWeb flushes on handler return). Residual: gamescope may still SEGV on nested kill; Moonlight cancel not re-proven this pass. |
+| #3 WebUI disconnect | **Blocked by #2** | Same release hang; `webui_stop=fail` empty/timeout. Issue already closed earlier — residual is stop path under #2. |
 | #4 Cancel 470 | **Code landed** | Not re-proven this run (no Moonlight cancel step). |
 | #5 Mode-agnostic apps | **Verified inject/apps (recommend close)** | lea `apps.json` v9: **12** Steam library apps mode-neutral (`steam-appid` + detached `rungameid`); only optional **Steam Big Picture** keeps `polaris-hdr-session`. Inject `polaris-hdr-inject-app`: mode-neutral skip when already unwrapped. **Does not assume gamescope-only** for library titles. E2E labwc/dongle launch of a library game still optional residual. |
-| #6 Smoke harness | **Partial** | Gate runs but stop can hang forever: `curl_json` still lacks `--max-time` (agent used temp curl wrap). Multimode: mode switchers wipe conf keys (see below). |
+| #6 Smoke harness | **Partial** | Gate has stop/disconnect timeouts; still fails on hung release. Multimode: mode switchers wipe conf keys (see below). |
 | #7 Portal units | **Ok this run** | Gate **units=ok screencast=ok** on all multimode paths. |
 | Portal token/cursor | **Code landed** | Keep restore_token; invalidate+retry once on SelectSources failure; wait for AvailableCursorModes≠0. |
 
-**Gate line (solid-base-final, lea post-deploy `50zsr6n`):**  
+**Gate line (solid-base after SB-2 pin `90d4ca6` / lea gen 440 `c6m365nm`):**  
 `solid-base-gate: units=ok screencast=ok preview=fail stream_start=ok stream_preview=ok stream_stop=fail webui_stop=fail dual_socket=ok encode=ok` → **fail** (blockers: `preview`, `stream_stop`, `webui_stop`)
 
-**Multimode gate (2026-07-28 ~08:10 CEST, log `/tmp/solid-base-multimode-gate-lea.log`):**  
-`multimode-gate: fail=1 modes=gamescope_stream headless_stream desktop_display restore=gamescope_stream`  
-Per mode (all three identical shape):  
-`units=ok screencast=ok preview=fail stream_start=fail stream_preview=fail stream_stop=ok webui_stop=ok dual_socket=ok encode=ok`
+**Multimode gate (2026-07-28 ~08:30 CEST, log `/tmp/solid-base-multimode-gate-lea2.log` + labwc solo `/tmp/solid-base-labwc-solo.log`):**  
 
-| Check | gamescope_stream | headless_stream | desktop_display | Why |
-|-------|------------------|-----------------|-----------------|-----|
-| units / screencast | ok | ok | ok | portal stack healthy |
-| preview (idle) | fail | fail | fail | API PNG ~32KB / gamescopectl empty (SB-1 residual) |
-| stream_start | fail | fail | fail | `Browser Stream is disabled in configuration` — `polaris-hdr-use-portal` / `polaris-hdr-use-labwc` **overwrite** conf without `browser_streaming = enabled` (default off) |
-| stream_preview | fail | fail | fail | cascade (no session) |
-| stream_stop / webui_stop | ok* | ok* | ok* | *vacuous — no live session; does **not** clear SB-2 |
-| dual_socket | ok | ok | ok | no dual gamescope after stop |
-| encode | ok* | ok* | ok* | *conf/cache says nvenc; no live encode proof without start |
+Harness fixes landed in `scripts/solid-base-multimode-gate.sh` / `solid-base-gate.sh`:
+- restore full conf backup after `polaris-hdr-use-*` templates (preserve `browser_streaming`, bitrate, …)
+- `GATE_SOFT_IDLE_PREVIEW=1` (idle preview is SB-1 residual; stream_preview still required)
+- mode-aware units/screencast (labwc/desktop do not require private gamescope portal)
+- labwc overlay: `hevc_mode=1` / `av1_mode=1` + clear encoder cache (see labwc note)
 
-**Root cause of multimode start fail (tooling, not path):** luxusAi mode helpers `cat >polaris.conf` minimal templates omit `browser_streaming` (and other lea keys). Multimode restore via `use-portal` also left host without browser stream until conf restored from `.bak-multimode-*`. Fix candidates: preserve/merge conf keys in use-portal/labwc; multimode-gate re-assert `browser_streaming=enabled` after each `apply_mode`; or gate refuses to run when `config_enabled=false`.
+| Mode | stream_start | stream_preview | stream_stop | webui_stop | encode | Notes |
+|------|--------------|----------------|-------------|------------|--------|-------|
+| **gamescope_stream** | **ok** | **ok** | **fail** | **fail** | ok | Live mid-stream gamescopectl; stop hangs in portal release (SB-2 residual) |
+| **headless_stream (labwc)** | **ok*** | **ok*** | **ok*** | **ok*** | **ok*** | *solo retest with SDR hevc/av1=1: labwc HEADLESS-1 + ext-image DMA-BUF + NVENC H.264 + clean stop. Multimode first pass failed encode with hevc_mode=3 (10-bit probe). |
+| **desktop_display** | **ok** | **ok** | **fail** | **fail** | ok | Starts with portal/session; same SB-2 release hang as gamescope |
+| **headless_dongle** | skip | — | — | — | — | `SKIP_DONGLE=1` (no `linux_streaming_output` / primary on lea) |
 
-**Post-stop host (journal, single-mode final):** `Fatal: 10 seconds passed… Forcing shutdown` during `browser_stream::prepare_for_session_teardown` / `stop_video_capture`; coredumpctl shows `.polaris-wrappe` SIGTRAP + `gamescope-wl` SIGSEGV after gate stop attempts (08:04–08:05 CEST).
+**Labwc residual:** cold cage reprob with `hevc_mode=3`/`av1_mode=3` fails NVENC on the 10-bit HDR validation path after successful SDR h264/hevc/av1 converters. SDR-only modes pass. Product fix still needed for true HDR labwc encode probe; multimode harness uses SDR for smoke.
 
-**Pin note:** tip includes SB-2 ordered stop + SB-5 unwrap; cancel-owner patch already upstreamed.
+**Root cause of earlier multimode start fail (tooling, fixed):** luxusAi mode helpers `cat >polaris.conf` minimal templates omit `browser_streaming`. Gate now restores backup then overlays mode keys.
+
+**SB-2 root cause evolution:**
+1. **Pre-bcd6f02 (`50zsr6n`):** `postBrowserStreamStop` → `prepare_for_session_teardown` called **unbounded** `stop_video_capture` (`thread::join`) **before** `portal::release_global_capture` on confighttp HTTPS thread → capture stuck in portal D-Bus / pipeline join → :47990 wedge → SIGTERM 10s force-shutdown **SIGTRAP** + gamescope torn down with PipeWire attached → CVulkanDevice dtor **SIGSEGV**.
+2. **Tip order (bcd6f02+):** release-then-3s-bound-join + `shared_ptr` capture ownership; **`90d4ca6`** also answers JSON after bounded teardown / can defer app terminate.
+3. **Post-deploy prove (`90d4ca6` / gen 440):** start+preview ok; **stream_stop/webui_stop still fail**. Hang is now **inside `portal::release_global_capture` (between teardown step2 and step3)** — not the old unbounded join-before-release. **No new polaris coredump** this run.
+
+**Post-stop host (prior gen 439 / `50zsr6n` journal):** `Fatal: 10 seconds passed… Forcing shutdown` during prepare / `stop_video_capture`; coredumpctl `.polaris-wrappe` SIGTRAP + `gamescope-wl` SIGSEGV (08:04–08:05 CEST). **Not re-observed** on gen 440 stop prove (empty/timeout responses instead).
+
+**Pin note:** lea runs tip **`90d4ca6`** (gen 440 `c6m365nm…/polaris-stream`). Ordered stop + answer-before-terminate landed; **release_global_capture still blocks** — SB-2 remains open.
 
 **Test preference (approved):** Browser Stream API for agent smoke.
 
@@ -152,16 +159,20 @@ Need portal/pipewire one-shot (or last-frame cache), not grim.
 ## 4. Rewrite deliverables still open
 
 - [ ] SB-1 idle preview green again (gate `preview=ok`; frames non-black and >50KB before stream start)
-- [ ] **SB-2 blocker (needs post-deploy gate):** live `stream_stop`/`webui_stop` green with no polaris core. Code fixes in cleanup commit (not yet proven on lea):
-  - prepare order: take capture state → **release portal** → **bounded join (3s)** then terminate
-  - portal `g_capture` is `shared_ptr`; release sets `running=false` + `notify_all` (no UAF on negotiate wait / capture loop)
-  - gate curl `--max-time` on stop/disconnect
-- [ ] SB-3 residual: `webui_stop=ok` once stop path no longer kills polaris (issue closed; track under #2)
+- [ ] **SB-2 blocker (post-`90d4ca6` deploy prove failed):** live `stream_stop`/`webui_stop` still fail (empty body / 25s timeout). Hang in **`portal::release_global_capture`** between prepare step2 and step3. Need bounded/async portal session Close + non-blocking HTTPS path so stop always returns JSON. No new polaris core this prove (improvement).
+  - [x] prepare order: take capture state → **release portal** → **bounded join (3s)** then terminate (code)
+  - [x] portal `g_capture` is `shared_ptr`; release sets `running=false` + `notify_all`
+  - [x] gate curl `--max-time` on stop/disconnect
+  - [x] HTTP stop/disconnect answer JSON before nested app/gamescope terminate (`90d4ca6`)
+  - [ ] **`release_global_capture` must not block confighttp** (current residual — D-Bus Close / PipeWire teardown)
+  - [ ] re-prove gate: `stream_stop=ok webui_stop=ok` on lea gen with tip binary
+- [ ] SB-3 residual: `webui_stop=ok` once stop path no longer hangs in portal release (issue closed; track under #2)
 - [x] Gate curl helpers: `--max-time` on stop/disconnect (2026-07-28 cleanup)
 - [x] SB-2 cancel-before-teardown + portal PW lock teardown + graceful stop (2026-07-28 code)
 - [x] SB-2 portal release before nested kill (`release_global_capture`) (2026-07-28 code)
 - [x] SB-2 sync capture join before gamescope kill (browser_stream + terminate_impl + disconnect) (2026-07-28)
 - [x] SB-2 prepare: portal release **before** capture join + bounded join (2026-07-28 PR cleanup)
+- [x] SB-2 stop never wedges via answer-after-bounded-teardown / defer terminate (`90d4ca6` code; **still blocked by release hang**)
 - [x] Portal restore_token invalidate+retry + cursor wait (2026-07-28)
 - [x] Portal shared ownership + release wakes capture loop (2026-07-28 PR cleanup)
 - [x] Docs honesty: runtime.md / stream-paths / changelog match gamescope+dongle available (2026-07-28 PR cleanup)
@@ -170,7 +181,7 @@ Need portal/pipewire one-shot (or last-frame cache), not grim.
 - [x] SB-5 gamescope wrap detached steam-appid + inject always-neutral unwrap (2026-07-28)
 - [x] SB-5 migration v9 + load normalize unwrap polaris-hdr-session library hardwire (2026-07-28) — **lea verified**
 - [ ] SB-4 Moonlight `/cancel` re-smoke (not in this gate line)
-- [ ] SB-2 post-deploy solid-base-gate + multimode with real starts (browser_streaming preserved)
+- [ ] SB-2 re-prove solid-base-gate + multimode after release_global_capture non-block fix
 - [ ] SB-5 optional: multimode gate launch one library game under labwc + gamescope with stock apps.json
 - [ ] luxusAi: `polaris-hdr-use-portal` / `use-labwc` merge conf keys instead of full overwrite (host follow-up; gate works around it)
 - [ ] Owned `gamescope_stream` start/wait/stop + attach-idle polish
