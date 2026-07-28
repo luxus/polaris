@@ -227,10 +227,7 @@ namespace dyn {
 }  // namespace dyn
 
 #ifdef POLARIS_BUILD_PORTAL
-// Defined in portal_grab.cpp (top-level ::portal, not nested under platf).
-namespace portal {
-  void release_global_capture();
-}
+  #include "portal_session.h"
 #endif
 
 namespace platf {

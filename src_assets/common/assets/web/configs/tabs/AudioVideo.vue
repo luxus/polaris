@@ -109,8 +109,8 @@ const streamDisplayModes = [
     badge: 'Physical dummy',
     available: true,
     group: 'host',
-    copy: 'Swap the desktop onto a physical dummy-plug (HDMI/DP dongle), blank the real panel (privacy), capture via KMS.',
-    note: 'Requires linux_streaming_output (dongle) + linux_primary_output (panel) + auto_manage. Save after setting outputs.',
+    copy: 'Swap the desktop onto a physical dummy-plug (HDMI/DP dongle), blank the real panel (privacy), capture via host portal ScreenCast.',
+    note: 'Runtime: none · Capture: portal (default; KMS optional) · Needs streaming + primary outputs + auto_manage',
   },
   {
     id: 'desktop_display',
@@ -118,8 +118,8 @@ const streamDisplayModes = [
     badge: 'Host / portal',
     available: true,
     group: 'host',
-    copy: 'Stream the host desktop or an external compositor (e.g. gamescope) via portal/KMS.',
-    note: 'Runtime: none · Capture: portal (typical) · Your lea gamescope path today',
+    copy: 'Stream the host desktop via portal. Prefer Private Stream (labwc) or Gamescope Stream for isolated apps.',
+    note: 'Runtime: none · Capture: portal · Host desktop only',
   },
 ]
 
@@ -220,50 +220,70 @@ const autoQualityRows = computed(() => [
     note: clientSettingsSync.value.relaunchRequired ? 'Relaunch to sync' : 'Push/pull ready',
   },
 ])
+const isLabwcPath = computed(() => (
+  streamDisplayMode.value === 'headless_stream' || streamDisplayMode.value === 'windowed_stream'
+))
+const isGamescopePath = computed(() => streamDisplayMode.value === 'gamescope_stream')
+const isDonglePath = computed(() => streamDisplayMode.value === 'headless_dongle')
+
 const nvidiaTrueHeadlessGpuNativeGuard = computed(() => (
+  isLabwcPath.value &&
   String(config.value.encoder || '').toLowerCase() === 'nvenc' &&
   config.value.headless_mode === 'enabled' &&
   config.value.linux_use_cage_compositor === 'enabled' &&
   config.value.linux_prefer_gpu_native_capture !== 'enabled'
 ))
-const linuxStreamingSetupChecklist = computed(() => [
-  {
-    id: 'pairing',
-    title: 'Pair encoder and display',
-    status: config.value.adapter_name || config.value.output_name ? 'Selected' : 'Discover first',
-    copy: config.value.adapter_name || config.value.output_name
-      ? 'Polaris has a GPU adapter or output hint saved for this host.'
-      : 'Start by selecting the GPU adapter/output Polaris should capture so encoder and display discovery line up.',
-  },
-  {
-    id: 'runtime',
-    title: 'Choose the Linux runtime path',
-    status: selectedStreamDisplayMode.value.title,
-    copy: 'Private Stream is the safe default. GPU-native is a capture capability/status, not a separate normal play mode; Polaris reports fallback honestly when frames cannot stay GPU-resident.',
-  },
-  {
-    id: 'quality',
-    title: 'Decide Auto Quality',
-    status: autoQualityBadge.value,
-    copy: autoQualityEnabled.value
-      ? 'Auto Quality will handle bitrate/profile recovery for this headless path.'
-      : 'Enable Auto Quality when you want Polaris to balance bitrate, profile choice, and recovery instead of hand-tuning every stream.',
-  },
-  {
-    id: 'wayland-vaapi',
-    title: 'Check Wayland / VAAPI capture truth',
-    status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native requested' : 'Safe default',
-    copy: config.value.linux_prefer_gpu_native_capture === 'enabled'
-      ? 'Polaris may use windowed labwc to avoid SHM/system-memory fallback and preserve GPU-resident DMA-BUF capture when the runtime proves it can. Session health will show GPU-native as the capture path.'
-      : 'VAAPI / Mesa is the AMD Linux baseline. Leave forced GPU-native off for normal Private Stream; turn it on only when telemetry shows SHM/system-memory fallback and you are collecting support evidence. KMS/DRM is advanced.',
-  },
-  ...(nvidiaTrueHeadlessGpuNativeGuard.value ? [{
-    id: 'nvidia-headless-gpu-native-guard',
-    title: 'NVIDIA true-headless guard',
-    status: 'Needs GPU-native preference',
-    copy: 'NVENC true-headless labwc hosts can hit cold-cache 503 encoder-init failures when linux_prefer_gpu_native_capture is disabled. Set linux_prefer_gpu_native_capture = enabled / Private Stream (GPU-native), restart Polaris, then retry before chasing CUDA or driver issues.',
-  }] : []),
-])
+const linuxStreamingSetupChecklist = computed(() => {
+  const items = [
+    {
+      id: 'path',
+      title: 'Pick a stream path',
+      status: selectedStreamDisplayMode.value.title,
+      copy: isGamescopePath.value
+        ? 'Gamescope Stream: attach idle gamescope-0 or spawn owned headless; portal captures it. Encoder/bitrate/HDR below still apply.'
+        : isDonglePath.value
+          ? 'Dongle: set streaming + primary outputs, privacy swap, portal capture after topology prepare.'
+          : isLabwcPath.value
+            ? 'Private Stream (labwc) is the solid default — apps stay off the desk, wlroots capture.'
+            : 'Mirror Desktop captures the host session via portal. Prefer Private Stream or Gamescope for isolated apps.',
+    },
+    {
+      id: 'encoder',
+      title: 'Encoder and quality',
+      status: autoQualityBadge.value,
+      copy: autoQualityEnabled.value
+        ? 'Auto Quality balances bitrate and profile recovery for this path.'
+        : 'Set encoder (NVENC/VAAPI), bitrate, and optional Auto Quality — these apply to labwc and gamescope.',
+    },
+  ]
+  if (isLabwcPath.value) {
+    items.push({
+      id: 'wayland-vaapi',
+      title: 'labwc GPU-native capture',
+      status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native requested' : 'Safe default',
+      copy: config.value.linux_prefer_gpu_native_capture === 'enabled'
+        ? 'Windowed labwc may be used to keep DMA-BUF capture GPU-resident when proven.'
+        : 'Leave GPU-native off unless session health shows SHM/system-memory fallback. This flag does not apply to Gamescope Stream.',
+    })
+  }
+  if (isGamescopePath.value) {
+    items.push({
+      id: 'gamescope-host',
+      title: 'Host gamescope stack',
+      status: 'Portal + gamescope-0',
+      copy: 'Needs gamescope on PATH and (on lea) private portal units. WebUI labwc flags (cage, GPU-native preference) are ignored for this path.',
+    })
+  }
+  if (nvidiaTrueHeadlessGpuNativeGuard.value) {
+    items.push({
+      id: 'nvidia-headless-gpu-native-guard',
+      title: 'NVIDIA true-headless guard',
+      status: 'Needs GPU-native preference',
+      copy: 'NVENC true-headless labwc hosts can hit cold-cache 503 when GPU-native capture is disabled. Switch to Private Stream (GPU-native) or enable the preference, restart, retry.',
+    })
+  }
+  return items
+})
 
 function setEnabledConfig(key, enabled) {
   config.value[key] = enabled ? 'enabled' : 'disabled'
@@ -505,20 +525,24 @@ const validateFallbackMode = (event) => {
           </div>
 
           <div
-            v-if="streamDisplayMode === 'gamescope_stream'"
+            v-if="isGamescopePath"
             class="rounded-lg border border-ice/20 bg-ice/5 px-3 py-2 text-sm text-storm"
           >
-            Gamescope Stream attaches to <code class="text-ice">gamescope-0</code> when the idle unit is running,
-            or spawns an owned headless Gamescope. Capture stays portal/PipeWire. Save and restart Polaris after switching.
+            <strong class="text-silver">Gamescope Stream</strong> attaches to
+            <code class="text-ice">gamescope-0</code> (idle unit) or spawns owned headless Gamescope.
+            Capture is portal/PipeWire. Settings that matter: path card, encoder, bitrate/HDR, apps.
+            labwc-only flags (cage compositor, GPU-native preference) are ignored on this path.
+            Save and restart Polaris after switching.
           </div>
 
           <div class="settings-subtle-surface" data-linux-streaming-setup>
             <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <div class="section-kicker">Linux Streaming Setup</div>
-                <h4 class="mt-2 text-sm font-semibold text-silver">Guided checklist for desktop Linux hosts</h4>
+                <h4 class="mt-2 text-sm font-semibold text-silver">Minimal checklist for this path</h4>
                 <div class="mt-1 text-sm leading-relaxed text-storm">
-                  Use this before the first Moonlight run: discover the display pair, keep Private Stream as the default, decide Auto Quality, then only force GPU-native capture when telemetry shows SHM/system-memory fallback.
+                  Default is <strong class="text-silver">Private Stream (labwc)</strong>. Gamescope works when the host stack is ready.
+                  Only the steps for the selected path are shown.
                 </div>
               </div>
               <span class="meta-pill shrink-0">{{ selectedStreamDisplayMode.title }}</span>
@@ -555,11 +579,21 @@ const validateFallbackMode = (event) => {
           <div class="grid gap-3 xl:grid-cols-3">
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-accent">Isolation</div>
-              <div class="mt-2 text-sm leading-relaxed text-storm">Private Stream keeps apps off your real desktop and is the default stability target.</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">
+                {{ isGamescopePath
+                  ? 'Gamescope Stream isolates paint in gamescope-0 (portal capture).'
+                  : 'Private Stream (labwc) keeps apps off your real desktop — the default stability target.' }}
+              </div>
             </div>
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-green-300">GPU path</div>
-              <div class="mt-2 text-sm leading-relaxed text-storm">GPU-native is reported as capture truth in session health. Force it only when diagnostics show CPU/SHM fallback.</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">
+                {{ isLabwcPath
+                  ? 'GPU-native is a labwc capture preference. Force it only when diagnostics show CPU/SHM fallback.'
+                  : isGamescopePath
+                    ? 'Gamescope uses portal/PipeWire capture; labwc GPU-native flags do not apply.'
+                    : 'Capture backend follows the path (portal for mirror/dongle; KMS only if you set capture=kms).' }}
+              </div>
             </div>
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">FPS target</div>
@@ -567,12 +601,12 @@ const validateFallbackMode = (event) => {
             </div>
           </div>
 
-          <details class="settings-disclosure rounded-lg border border-storm/30 bg-deep/30">
+          <details v-if="isLabwcPath" class="settings-disclosure rounded-lg border border-storm/30 bg-deep/30">
             <summary class="settings-disclosure-summary p-4">
               <div>
                 <div class="section-kicker">Advanced</div>
-                <h4 class="mt-2 text-sm font-semibold text-silver">Advanced Linux runtime flags</h4>
-                <div class="mt-1 text-sm text-storm">Direct access to the existing config keys used by the mode selector.</div>
+                <h4 class="mt-2 text-sm font-semibold text-silver">labwc runtime flags</h4>
+                <div class="mt-1 text-sm text-storm">These keys only affect Private Stream / labwc paths. Hidden when Gamescope or host paths are selected.</div>
               </div>
               <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
             </summary>

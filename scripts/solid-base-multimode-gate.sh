@@ -12,7 +12,8 @@
 #   MODES             default "gamescope_stream headless_stream desktop_display"
 #   RESTORE_MODE      mode to leave conf in after run (default gamescope_stream)
 #   SKIP_DONGLE       1 to never try headless_dongle (default 1)
-#   SETTLE_S          wait after polaris restart before gate (default 8)
+#   SETTLE_S          wait after polaris restart before gate (default 12)
+#   GATE_SOFT_IDLE_PREVIEW  default 1 for multimode (idle preview is SB-1 residual)
 #
 # Exit 0 only if every attempted mode reports gate ok (or skip with reason).
 # Prints one line per mode + final summary.
@@ -26,7 +27,9 @@ RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 MODES="${MODES:-gamescope_stream headless_stream desktop_display}"
 RESTORE_MODE="${RESTORE_MODE:-gamescope_stream}"
 SKIP_DONGLE="${SKIP_DONGLE:-1}"
-SETTLE_S="${SETTLE_S:-8}"
+SETTLE_S="${SETTLE_S:-12}"
+# Multimode default: do not fail whole mode on idle preview (stream_preview still gated).
+export GATE_SOFT_IDLE_PREVIEW="${GATE_SOFT_IDLE_PREVIEW:-1}"
 BACKUP=""
 
 log() { printf '[multimode-gate] %s\n' "$*" >&2; }
@@ -73,8 +76,16 @@ restart_polaris() {
   return 1
 }
 
-# Host helpers (polaris-hdr-use-portal / use-labwc) may rewrite polaris.conf from
-# minimal templates and drop lea keys. Re-assert agent-smoke essentials after apply.
+# Host helpers (polaris-hdr-use-portal / use-labwc) rewrite polaris.conf from
+# minimal templates and drop lea keys (browser_streaming, bitrate, …).
+# Restore the pre-multimode backup first, then overlay mode-specific keys.
+restore_base_conf() {
+  if [[ -n "$BACKUP" && -f "$BACKUP" ]]; then
+    cp -a "$BACKUP" "$CONF"
+    log "restored base conf from backup before mode overlay"
+  fi
+}
+
 preserve_agent_smoke_keys() {
   # Browser Stream is the approved agent smoke path; default conf has it off.
   set_conf_key browser_streaming enabled
@@ -89,29 +100,42 @@ apply_mode() {
   log "apply mode=$mode"
   case "$mode" in
     gamescope_stream)
+      # Apply portal stack drop-in + units via helper, then restore full conf + mode keys.
       if command -v polaris-hdr-use-portal >/dev/null 2>&1; then
         polaris-hdr-use-portal
-      else
-        set_conf_key capture portal
-        set_conf_key headless_mode disabled
-        set_conf_key linux_use_cage_compositor disabled
-        restart_polaris
       fi
+      restore_base_conf
+      set_conf_key headless_mode disabled
+      set_conf_key linux_use_cage_compositor disabled
+      set_conf_key capture portal
       set_conf_key linux_stream_mode gamescope_stream
       preserve_agent_smoke_keys
-      # use-portal already restarted; re-set mode and restart once more
       restart_polaris
       ;;
     headless_stream)
+      # Helper tears down private portal drop-in; restore conf after so keys survive.
       if command -v polaris-hdr-use-labwc >/dev/null 2>&1; then
         polaris-hdr-use-labwc
       else
-        set_conf_key headless_mode enabled
-        set_conf_key linux_use_cage_compositor enabled
-        set_conf_key capture ""
-        restart_polaris
+        rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/polaris.service.d/hdr-portal.conf" 2>/dev/null || true
+        systemctl --user daemon-reload 2>/dev/null || true
+        systemctl --user stop polaris-portal.service polaris-portal-gamescope.service polaris-portal-dbus.service 2>/dev/null || true
+      fi
+      restore_base_conf
+      set_conf_key headless_mode enabled
+      set_conf_key linux_use_cage_compositor enabled
+      # labwc path does not use portal capture
+      if grep -qE '^[[:space:]]*capture[[:space:]]*=' "$CONF" 2>/dev/null; then
+        sed -i -E '/^[[:space:]]*capture[[:space:]]*=/d' "$CONF"
       fi
       set_conf_key linux_stream_mode headless_stream
+      set_conf_key linux_private_runtime labwc
+      # NVIDIA labwc DMA-BUF validate currently fails the 10-bit HDR probe
+      # (hevc_mode=3/av1_mode=3). SDR-only modes pass cold encoder reprob.
+      set_conf_key hevc_mode 1
+      set_conf_key av1_mode 1
+      # Drop stale portal topology cache so cage reprob is honest.
+      rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/polaris/encoder_cache.txt" 2>/dev/null || true
       preserve_agent_smoke_keys
       restart_polaris
       ;;
@@ -120,11 +144,11 @@ apply_mode() {
       rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/polaris.service.d/hdr-portal.conf" 2>/dev/null || true
       systemctl --user daemon-reload 2>/dev/null || true
       systemctl --user stop polaris-portal.service polaris-portal-gamescope.service polaris-portal-dbus.service 2>/dev/null || true
+      restore_base_conf
       set_conf_key headless_mode disabled
       set_conf_key linux_use_cage_compositor disabled
       set_conf_key capture portal
       set_conf_key linux_stream_mode desktop_display
-      set_conf_key encoder nvenc
       preserve_agent_smoke_keys
       restart_polaris
       ;;
@@ -134,6 +158,7 @@ apply_mode() {
         return 2
       fi
       # Requires configured outputs — set mode and let path fail closed if unavailable
+      restore_base_conf
       set_conf_key linux_stream_mode headless_dongle
       set_conf_key headless_mode disabled
       set_conf_key linux_use_cage_compositor disabled
@@ -160,13 +185,15 @@ run_gate_for_mode() {
   local mode="$1"
   local out
   out=$(mktemp)
-  # Labwc: grim preview possible; gamescope: gamescopectl; desktop: may skip dual_socket strictness
-  local extra=()
-  if [[ "$mode" == "desktop_display" ]]; then
-    # dual gamescope sockets irrelevant
-    :
+  # Labwc needs longer mid-stream settle (compositor + capture cold start).
+  local settle="$SETTLE_S"
+  local stream_settle="${GATE_STREAM_SETTLE_S:-8}"
+  if [[ "$mode" == "headless_stream" || "$mode" == "windowed_stream" ]]; then
+    stream_settle="${GATE_STREAM_SETTLE_S:-12}"
   fi
   set +e
+  GATE_LINUX_STREAM_MODE="$mode" \
+  GATE_STREAM_SETTLE_S="$stream_settle" \
   POLARIS_COOKIE_JAR="/tmp/polaris-mm-${mode}.cookies" \
     "$GATE" >"$out" 2> >(while read -r line; do log "[$mode] $line"; done)
   local rc=$?
@@ -211,6 +238,13 @@ for mode in $MODES; do
   else
     results+=("mode=$mode result=fail gate")
     fail=1
+  fi
+  # SB-2 residual: stream_stop can core-dump polaris; ensure next mode starts clean.
+  if ! systemctl --user is-active --quiet polaris.service 2>/dev/null; then
+    log "polaris inactive after mode=$mode — restarting before next mode"
+    systemctl --user reset-failed polaris.service 2>/dev/null || true
+    systemctl --user restart polaris.service 2>/dev/null || true
+    sleep 3
   fi
 done
 

@@ -73,6 +73,7 @@
   #include "platform/windows/utils.h"
   #include <Windows.h>
 #elif __linux__
+  #include "platform/linux/session_media.h"
   #include <sys/stat.h>
   #include <unistd.h>
 #elif __APPLE__
@@ -4065,22 +4066,18 @@ namespace confighttp {
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       std::string uuid = input_tree.value("uuid", "");
 
-      // Host-operator path: WebUI disconnect must fully end the stream (RTSP +
-      // app + path cleanup), not only stop one RTSP session by uuid.
-      // Moonlight cancel keeps ownership rules; Dashboard is force-stop.
-      // SB-2: answer HTTPS first, then portal/capture + nested kill off the
-      // critical path for the response body (pw_thread_loop_stop can hang).
+      // Host-operator path: WebUI disconnect fully ends the stream. Answer HTTPS
+      // first, then session_media worker runs media teardown + nested kill.
       output_tree["status"] = true;
       output_tree["force"] = true;
       BOOST_LOG(info) << "WebUI disconnect: responding before capture/nested teardown"sv;
       send_response(response, output_tree);
 
-      // Nested teardown after the response — must not block handler return
-      // (SimpleWeb flushes body when the handler finishes).
-      std::thread {[uuid = std::move(uuid)]() {
+#ifdef __linux__
+      session_media::schedule([uuid = std::move(uuid)]() {
         try {
           BOOST_LOG(info) << "WebUI disconnect: async prepare capture/portal teardown"sv;
-          browser_stream::prepare_for_session_teardown();
+          session_media::prepare_for_stop();
 
           if (!uuid.empty()) {
             const auto shutdown = proc::proc.request_session_shutdown(uuid, {}, true, false);
@@ -4115,7 +4112,30 @@ namespace confighttp {
         } catch (const std::exception &e) {
           BOOST_LOG(warning) << "WebUI disconnect: nested force-stop failed: "sv << e.what();
         }
+      });
+#else
+      // Non-Linux: keep previous force-stop path on a detached thread.
+      std::thread {[uuid = std::move(uuid)]() {
+        try {
+          if (!uuid.empty()) {
+            const auto shutdown = proc::proc.request_session_shutdown(uuid, {}, true, false);
+            if (!shutdown.stopped) {
+              rtsp_stream::terminate_sessions();
+              proc::proc.terminate();
+            }
+            nvhttp::find_and_stop_session(uuid, true);
+          }
+          else {
+            rtsp_stream::terminate_sessions();
+            if (proc::proc.running() > 0) {
+              proc::proc.terminate();
+            }
+          }
+        } catch (const std::exception &e) {
+          BOOST_LOG(warning) << "WebUI disconnect: nested force-stop failed: "sv << e.what();
+        }
       }}.detach();
+#endif
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Disconnect: "sv << e.what();
       bad_request(response, request, e.what());
@@ -4578,10 +4598,8 @@ namespace confighttp {
       BOOST_LOG(warning) << "BrowserStreamStop: "sv << e.what();
     }
 
-    // SB-2: answer HTTPS *before* any portal/PW/capture join work.
-    // lea 2026-07-28: prepare hung inside portal release (pw_thread_loop_stop)
-    // → empty curl body even after bounded join was added. Token/helper stop
-    // runs without prepare; media teardown + app kill happen after the write.
+    // Answer HTTPS before portal/PW work. Token stop without media; schedule
+    // media teardown on the session_media worker after the response flushes.
     browser_stream::stop_session_result_t result;
     if (!token.empty()) {
       result = browser_stream::stop_session(
@@ -4597,18 +4615,17 @@ namespace confighttp {
     output["status"] = true;
     output["stopped"] = true;
     output["token_matched"] = result.stopped;
+    output["media_draining"] = true;
     BOOST_LOG(info) << "BrowserStreamStop: responding before teardown token_ok="sv
                     << result.stopped << " owns_app="sv << result.owns_app;
     send_response(response, output);
 
-    // SimpleWeb may not flush the body until this handler returns. Never run
-    // portal/PW/app kill on the HTTPS worker — detach teardown so curl gets
-    // a body even when pw_thread_loop_stop blocks for minutes.
     const bool owns_app = result.owns_app;
-    std::thread {[owns_app]() {
+#ifdef __linux__
+    session_media::schedule([owns_app]() {
       try {
         BOOST_LOG(info) << "BrowserStreamStop: async prepare capture/portal teardown"sv;
-        browser_stream::prepare_for_session_teardown();
+        session_media::prepare_for_stop();
         if (owns_app) {
           BOOST_LOG(info) << "BrowserStreamStop: async terminate owned app"sv;
           proc::proc.terminate(false, false);
@@ -4616,7 +4633,19 @@ namespace confighttp {
       } catch (const std::exception &e) {
         BOOST_LOG(warning) << "BrowserStreamStop: async teardown failed: "sv << e.what();
       }
+    });
+#else
+    std::thread {[owns_app]() {
+      try {
+        browser_stream::prepare_for_session_teardown();
+        if (owns_app) {
+          proc::proc.terminate(false, false);
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "BrowserStreamStop: async teardown failed: "sv << e.what();
+      }
     }}.detach();
+#endif
   }
 
   /**

@@ -83,7 +83,8 @@ export function applyStreamDisplayModeToConfig(config = {}, mode) {
       next.linux_prefer_gpu_native_capture = 'disabled'
       next.linux_auto_manage_displays = 'enabled'
       next.headless_swap_mode = next.headless_swap_mode || 'privacy'
-      next.capture = 'kms'
+      // Portal after topology swap is the working default (KMS needs CAP_SYS_ADMIN).
+      next.capture = next.capture === 'kms' ? 'kms' : 'portal'
       break
     case 'desktop_display':
     default:

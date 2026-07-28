@@ -53,16 +53,14 @@ extern "C" {
   #include <boost/process/v1/handles.hpp>
   #include <boost/process/v1/io.hpp>
   #include <boost/process/v1/start_dir.hpp>
-  #include "platform/linux/cage_display_router.h"
+  #include "platform/linux/stream_runtime.h"
+  #include "platform/linux/stream_display_policy.h"
+  #ifdef POLARIS_BUILD_PORTAL
+    #include "platform/linux/portal_session.h"
+  #endif
   #include <dirent.h>
   #include <sys/stat.h>
   #include <unistd.h>
-  #ifdef POLARIS_BUILD_PORTAL
-  // portal_grab.cpp — drop ScreenCast/PipeWire before nested compositor kill.
-  namespace portal {
-    void release_global_capture();
-  }
-  #endif
 #endif
 
 using namespace std::literals;
@@ -450,10 +448,13 @@ namespace browser_stream {
       return launch_session;
     }
 
-    // Private runtime for Browser Stream: labwc cage and/or gamescope (idle
-    // attach / gamescope_stream / portal host). Previously required cage only,
-    // which blocked smoke and WebUI tests on gamescope hosts (lea).
+    // Private runtime via stream_runtime facade (labwc adapter + gamescope).
     bool gamescope_socket_ready() {
+      auto runtime = stream_runtime::acquire(stream_display_policy::private_runtime_e::GAMESCOPE);
+      if (runtime && runtime->is_running()) {
+        return true;
+      }
+      // Attach path: idle unit may own the socket without our owned process.
       const char *rt = std::getenv("XDG_RUNTIME_DIR");
       if (!rt || !*rt) {
         return false;
@@ -474,33 +475,46 @@ namespace browser_stream {
     }
 
     bool private_runtime_configured() {
-      if (config::video.linux_display.use_cage_compositor) {
+      if (auto runtime = stream_runtime::acquire_for_current_policy()) {
         return true;
       }
       const auto &mode = config::video.linux_display.stream_mode;
       if (mode == "gamescope_stream" || mode == "headless_stream" || mode == "windowed_stream") {
         return true;
       }
-      // Portal capture on lea historically means external/idle gamescope.
-      if (config::video.capture == "portal" && gamescope_socket_ready()) {
+      if (config::video.linux_display.use_cage_compositor) {
         return true;
       }
+      // Portal + live gamescope socket still counts as a private paint surface.
       return gamescope_socket_ready();
     }
 
     bool private_runtime_active() {
-      if (cage_display_router::is_running()) {
-        return true;
+      if (auto runtime = stream_runtime::acquire_for_current_policy()) {
+        if (runtime->is_running()) {
+          return true;
+        }
+      }
+      // Labwc adapter may not be the resolved policy if config drifted — probe both.
+      if (auto labwc = stream_runtime::acquire(stream_display_policy::private_runtime_e::LABWC)) {
+        if (labwc->is_running()) {
+          return true;
+        }
       }
       return gamescope_socket_ready();
     }
 
     std::string private_runtime_backend() {
-      if (cage_display_router::is_running()) {
-        return "labwc";
+      if (auto labwc = stream_runtime::acquire(stream_display_policy::private_runtime_e::LABWC)) {
+        if (labwc->is_running()) {
+          return std::string {labwc->backend_id()};
+        }
       }
       if (gamescope_socket_ready()) {
         return "gamescope";
+      }
+      if (auto runtime = stream_runtime::acquire_for_current_policy()) {
+        return std::string {runtime->backend_id()};
       }
       if (config::video.linux_display.use_cage_compositor) {
         return "labwc";
@@ -1607,33 +1621,23 @@ namespace browser_stream {
 
   void prepare_for_session_teardown() {
 #ifdef __linux__
-    // Ordered stop (SB-2 / issue #2):
-    // 1) signal capture shutdown (mail::shutdown)
-    // 2) release portal/PipeWire so capture loops wake (running=false + notify)
-    // 3) join capture threads with a bound (never hang HTTPS past force-shutdown)
-    // 4) only then may terminate_impl pidfd-kill gamescope/labwc
-    // Previous order joined *before* portal release → hang in stop_video_capture
-    // while PW stayed attached into a dying compositor (SIGTRAP + gamescope SEGV).
-    //
-    // Deployed pre-bcd6f02 lea stack: postBrowserStreamStop → prepare →
-    // stop_video_capture → unbounded thread::join while capture sat in portal
-    // wait_for_response / video::capture_thread_async join → :47990 wedge →
-    // SIGTERM 10s force-shutdown SIGTRAP + gamescope CVulkanDevice SEGV.
+    // Single ordered media teardown (prefer session_media::prepare_for_stop as
+    // the external entry). History: join-before-release hung HTTPS; release
+    // hangs in pw_thread_loop_stop — bound join + portal budget, then settle.
+    // See docs/research/stream-path-rewrite-followups.md (SB-2).
     const bool had_media = video_capture_active() || audio_capture_active();
-    BOOST_LOG(info) << "Browser Stream teardown: step1 signal capture shutdown (had_media="sv
+    BOOST_LOG(info) << "session_media: step1 signal capture shutdown (had_media="sv
                     << had_media << ")"sv;
     auto state = take_capture_state_for_stop();
 #ifdef POLARIS_BUILD_PORTAL
-    BOOST_LOG(info) << "Browser Stream teardown: step2 release portal/PipeWire"sv;
+    BOOST_LOG(info) << "session_media: step2 release portal/PipeWire"sv;
     portal::release_global_capture();
 #endif
-    BOOST_LOG(info) << "Browser Stream teardown: step3 bounded capture join (3s)"sv;
+    BOOST_LOG(info) << "session_media: step3 bounded capture join (3s)"sv;
     finish_video_capture_stop(std::move(state), 3s);
-    // Only settle when we actually dropped a live capture — avoids stacking
-    // 100ms delays when prepare is called from stop + terminate + disconnect.
     if (had_media) {
       std::this_thread::sleep_for(100ms);
-      BOOST_LOG(info) << "Browser Stream teardown: ready for nested compositor kill"sv;
+      BOOST_LOG(info) << "session_media: media ready for nested compositor kill"sv;
     }
 #endif
   }
@@ -1734,7 +1738,20 @@ namespace browser_stream {
     };
 #ifdef __linux__
     {
-      std::string wl_sock = cage_display_router::get_wayland_socket();
+      std::string wl_sock;
+      bool headless = false;
+      if (auto runtime = stream_runtime::acquire_for_current_policy()) {
+        wl_sock = runtime->wayland_socket();
+        headless = runtime->runtime_state().effective_headless;
+      }
+      if (wl_sock.empty()) {
+        if (auto labwc = stream_runtime::acquire(stream_display_policy::private_runtime_e::LABWC)) {
+          if (labwc->is_running()) {
+            wl_sock = labwc->wayland_socket();
+            headless = labwc->runtime_state().effective_headless;
+          }
+        }
+      }
       if (wl_sock.empty() && gamescope_socket_ready()) {
         if (const char *gs = std::getenv("GAMESCOPE_WAYLAND_DISPLAY"); gs && *gs) {
           wl_sock = gs;
@@ -1742,14 +1759,13 @@ namespace browser_stream {
         else {
           wl_sock = "gamescope-0";
         }
+        headless = true;
       }
       output["isolation"] = {
         {"backend", private_runtime_backend().empty() ? "labwc" : private_runtime_backend()},
         {"available", private_runtime_configured()},
         {"active", private_runtime_active()},
-        {"headless", cage_display_router::is_running() ?
-                       cage_display_router::runtime_state().effective_headless :
-                       gamescope_socket_ready()},
+        {"headless", headless},
         {"wayland_socket", wl_sock},
       };
     }
@@ -1984,7 +2000,20 @@ namespace browser_stream {
     };
 #ifdef __linux__
     {
-      std::string wl_sock = cage_display_router::get_wayland_socket();
+      std::string wl_sock;
+      bool headless = false;
+      if (auto runtime = stream_runtime::acquire_for_current_policy()) {
+        wl_sock = runtime->wayland_socket();
+        headless = runtime->runtime_state().effective_headless;
+      }
+      if (wl_sock.empty()) {
+        if (auto labwc = stream_runtime::acquire(stream_display_policy::private_runtime_e::LABWC)) {
+          if (labwc->is_running()) {
+            wl_sock = labwc->wayland_socket();
+            headless = labwc->runtime_state().effective_headless;
+          }
+        }
+      }
       if (wl_sock.empty() && gamescope_socket_ready()) {
         if (const char *gs = std::getenv("GAMESCOPE_WAYLAND_DISPLAY"); gs && *gs) {
           wl_sock = gs;
@@ -1992,12 +2021,11 @@ namespace browser_stream {
         else {
           wl_sock = "gamescope-0";
         }
+        headless = true;
       }
       output["isolation"] = {
         {"backend", private_runtime_backend().empty() ? "labwc" : private_runtime_backend()},
-        {"headless", cage_display_router::is_running() ?
-                       cage_display_router::runtime_state().effective_headless :
-                       gamescope_socket_ready()},
+        {"headless", headless},
         {"wayland_socket", wl_sock},
       };
     }

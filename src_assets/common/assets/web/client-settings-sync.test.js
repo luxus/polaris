@@ -55,6 +55,15 @@ describe('client settings sync helpers', () => {
     expect(gamescope.linux_stream_mode).toBe('gamescope_stream')
     expect(gamescope.linux_private_runtime).toBe('gamescope')
     expect(gamescope.linux_use_cage_compositor).toBe('disabled')
+    expect(gamescope.capture).toBe('portal')
+
+    const dongle = applyStreamDisplayModeToConfig({}, 'headless_dongle')
+    expect(dongle.linux_stream_mode).toBe('headless_dongle')
+    expect(dongle.capture).toBe('portal')
+    expect(dongle.linux_auto_manage_displays).toBe('enabled')
+    // Explicit kms is preserved for CAP_SYS_ADMIN hosts.
+    const dongleKms = applyStreamDisplayModeToConfig({ capture: 'kms' }, 'headless_dongle')
+    expect(dongleKms.capture).toBe('kms')
   })
 
   it('labels GPU-native as a Private Stream capture capability', () => {

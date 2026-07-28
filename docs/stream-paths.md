@@ -21,7 +21,7 @@ Config key: `linux_stream_mode = <path id>`. Legacy booleans (`headless_mode`, `
 | `gamescope_stream` | gamescope | portal | leave_alone | **Available** when `gamescope` is on PATH (attach idle or spawn owned) |
 | `family_isolated` | labwc | wlroots | leave_alone | **Reserved** — Family Mode / isolated per-app (PR #226) |
 | `headless_evdi` | none | evdi | swap_primary | **Reserved** — EVDI-as-primary (PR #226) |
-| `headless_dongle` | none | kms | swap_primary | **Available** when `linux_streaming_output` + `linux_primary_output` + auto_manage are set (privacy swap via kscreen-doctor) |
+| `headless_dongle` | none | portal (default; kms optional) | swap_primary | **Available** when `linux_streaming_output` + `linux_primary_output` + auto_manage are set (privacy swap via kscreen-doctor; host ScreenCast after topology prepare) |
 
 Source of truth: `src/platform/linux/stream_path.{h,cpp}` registry.
 
@@ -40,10 +40,26 @@ Source of truth: `src/platform/linux/stream_path.{h,cpp}` registry.
 7. **Stats**: set `runtime_backend` + `stream_path_id` via `stream_stats::update_runtime_state` (or rely on policy `backend_name` when idle).
 8. **Tests**: selection ↔ legacy round-trip; unavailable apply rejects; launch contract lists only available primary paths.
 
+## Module map (keep boundaries)
+
+| Module | Owns |
+|--------|------|
+| `stream_path` | Path ids + runtime/capture/topology vocabulary |
+| `stream_display_policy` | resolve/apply + legacy bool bridge (one release cycle) |
+| `stream_runtime` | Private compositor lifecycle (labwc adapter, gamescope) |
+| `session_media` | **Only** ordered media teardown + post-HTTP stop worker |
+| `portal_session` / `portal_grab` | ScreenCast session + global PipeWire capture |
+| `pipewire_capture` | PW stream format/copy/dtor |
+| `display_topology` | Dongle prepare/restore (kscreen) |
+| `process` | App launch + nested kill **after** `session_media` |
+
+Stop callers must not invent a parallel order: confighttp / terminate_impl → `session_media::prepare_for_stop()` → optional `proc::terminate`.
+
 ## What not to do
 
 - Do not add a fourth boolean to encode a new mode.
-- Do not special-case gamescope/EVDI only inside `cage_display_router`.
+- Do not special-case gamescope/EVDI only inside `cage_display_router` — go through `stream_runtime`.
+- Do not call `portal::release_global_capture` from HTTP handlers (use `session_media`).
 - Do not report `runtime_backend` empty — use `portal`, `host`, `gamescope`, `labwc`, etc.
 
 ## Relation to community PR #226

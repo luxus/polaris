@@ -160,9 +160,9 @@ namespace stream_path {
         k_headless_dongle,
         "Headless Dongle",
         "Physical dummy",
-        "Swap the desktop onto a physical dummy-plug connector for KMS capture. Requires linux_streaming_output + linux_primary_output + auto_manage.",
+        "Swap the desktop onto a physical dummy-plug connector, blank the panel (privacy), capture via host portal ScreenCast (default). KMS remains optional for CAP_SYS_ADMIN hosts. Requires linux_streaming_output + linux_primary_output + auto_manage.",
         runtime_kind_e::NONE,
-        capture_kind_e::KMS,
+        capture_kind_e::PORTAL,
         topology_kind_e::SWAP_PRIMARY,
         false,
         true,
@@ -174,13 +174,13 @@ namespace stream_path {
   }
 
   const descriptor_t *find(std::string_view id) {
+    // Pointer into process-lifetime static table (not thread_local scratch).
+    // Safe for callers that hold the pointer across awaits on this thread.
+    static const std::vector<descriptor_t> table = registry();
     const auto key = to_lower_copy(id);
-    for (const auto &entry : registry()) {
+    for (const auto &entry : table) {
       if (key == entry.id) {
-        // Return pointer into a static copy so callers can keep it briefly.
-        static thread_local descriptor_t storage;
-        storage = entry;
-        return &storage;
+        return &entry;
       }
     }
     return nullptr;

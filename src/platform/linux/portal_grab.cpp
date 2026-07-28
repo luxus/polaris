@@ -802,8 +802,12 @@ namespace portal {
   }
 
   // -----------------------------------------------------------------------
-  // Direct wlr-screencopy capture from cage (no portal, no picker)
+  // Direct wlr-screencopy capture from cage (no portal, no picker).
   // Self-contained Wayland client that connects to cage's socket.
+  //
+  // NOTE: Wrong layer long-term — belongs next to wlgrab as a labwc fallback.
+  // Kept here only because portal_grab still selects this path when capture is
+  // forced to cage screencopy. Do not grow this block; extract on next touch.
   // -----------------------------------------------------------------------
 
   struct screencopy_state_t {

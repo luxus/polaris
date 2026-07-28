@@ -156,11 +156,12 @@ TEST(SessionStopContractTests, CancelAnswersClientBeforeNestedTeardown) {
 
 TEST(SessionStopContractTests, PortalPipeWireTeardownDisconnectsUnderLoopLock) {
   // SB-2: destroy without disconnect under lock races state_changed → SEGV.
-  const auto source = read_portal_grab_source_for_contract();
+  // Dtor lives in pipewire_capture (extracted from portal_grab).
+  const auto source = read_source_for_contract("src/platform/linux/pipewire_capture.cpp");
   ASSERT_FALSE(source.empty());
-  const auto dtor = source.find("~pw_capture_t()");
+  const auto dtor = source.find("capture_t::~capture_t()");
   ASSERT_NE(dtor, std::string::npos);
-  const auto dtor_end = source.find("static void on_process", dtor);
+  const auto dtor_end = source.find("bool capture_t::start()", dtor);
   ASSERT_NE(dtor_end, std::string::npos);
   const auto body = source.substr(dtor, dtor_end - dtor);
   const auto stop = body.find("pw_thread_loop_stop(");
@@ -177,21 +178,22 @@ TEST(SessionStopContractTests, PortalPipeWireTeardownDisconnectsUnderLoopLock) {
 }
 
 TEST(SessionStopContractTests, PortalReleaseRunsBeforeNestedCompositorKill) {
-  // SB-2 residual: portal PW still attached when gamescope dies → host SEGV.
-  // terminate_impl must release portal capture before Steam/cage cleanup.
+  // terminate_impl must run session_media (portal release inside) before Steam/cage kill.
   const auto source = read_source_for_contract("src/process.cpp");
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void proc_t::terminate_impl(");
   ASSERT_NE(start, std::string::npos);
   const auto body = source.substr(start, 1200);
-  const auto release = body.find("portal::release_global_capture(");
+  const auto prepare = body.find("session_media::prepare_for_stop(");
   const auto steam = body.find("terminate_session_owned_steam_before_cage_stop(");
   const auto gen = body.find("terminate_isolated_session_generation(");
-  ASSERT_NE(release, std::string::npos);
+  ASSERT_NE(prepare, std::string::npos);
   ASSERT_NE(steam, std::string::npos);
   ASSERT_NE(gen, std::string::npos);
-  EXPECT_LT(release, steam);
-  EXPECT_LT(release, gen);
+  EXPECT_LT(prepare, steam);
+  EXPECT_LT(prepare, gen);
+  // Double portal release is forbidden — only session_media may release.
+  EXPECT_EQ(body.find("portal::release_global_capture("), std::string::npos);
 }
 
 TEST(SessionStopContractTests, StreamingWillStopReleasesPortalCapture) {
@@ -204,9 +206,7 @@ TEST(SessionStopContractTests, StreamingWillStopReleasesPortalCapture) {
 }
 
 TEST(SessionStopContractTests, BrowserStreamStopJoinsCaptureBeforeAppTerminate) {
-  // SB-2 residual (issue #2): async stop left PipeWire attached while terminate
-  // killed gamescope → polaris SEGV in on_param_changed and gamescope
-  // CVulkanDevice dtor. stop_session must sync-join capture before terminate.
+  // stop_session must sync-join capture before terminate when release_media is true.
   const auto source = read_source_for_contract("src/browser_stream.cpp");
   ASSERT_FALSE(source.empty());
   const auto stop_start = source.find("stop_session_result_t stop_session(");
@@ -219,16 +219,12 @@ TEST(SessionStopContractTests, BrowserStreamStopJoinsCaptureBeforeAppTerminate) 
   ASSERT_NE(prepare, std::string::npos);
   ASSERT_NE(terminate, std::string::npos);
   EXPECT_LT(prepare, terminate);
-  // Async stop must not race terminate on the stop path.
   EXPECT_EQ(body.find("stop_video_capture_async("), std::string::npos);
-  // HTTP can defer terminate; flag must exist.
   EXPECT_NE(body.find("terminate_owned_app"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, PrepareForSessionTeardownReleasesPortalBeforeJoin) {
-  // SB-2 hang residual: joining capture before portal release blocked HTTPS
-  // until 10s force-shutdown SIGTRAP. Order must be: take state → release
-  // portal → bounded join (never async on this path).
+  // Order: take state → release portal → bounded join.
   const auto source = read_source_for_contract("src/browser_stream.cpp");
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void prepare_for_session_teardown()");
@@ -243,7 +239,6 @@ TEST(SessionStopContractTests, PrepareForSessionTeardownReleasesPortalBeforeJoin
   EXPECT_LT(take, release);
   EXPECT_LT(release, join);
   EXPECT_EQ(body.find("stop_video_capture_async("), std::string::npos);
-  // Bounded join so HTTP cannot hang forever (3s budget).
   EXPECT_NE(body.find("3s"), std::string::npos);
 }
 
@@ -252,31 +247,29 @@ TEST(SessionStopContractTests, PortalGlobalCaptureUsesSharedOwnership) {
   // release_global_capture can destroy g_capture (UAF on negotiated).
   const auto source = read_portal_grab_source_for_contract();
   ASSERT_FALSE(source.empty());
-  EXPECT_NE(source.find("static std::shared_ptr<pw_capture_t> g_capture"), std::string::npos);
-  EXPECT_NE(source.find("static std::shared_ptr<pw_capture_t> ensure_global_capture"), std::string::npos);
+  EXPECT_NE(source.find("static std::shared_ptr<pipewire_capture::capture_t> g_capture"), std::string::npos);
+  EXPECT_NE(source.find("ensure_global_capture"), std::string::npos);
   const auto release = source.find("void release_global_capture()");
   ASSERT_NE(release, std::string::npos);
-  const auto release_body = source.substr(release, 900);
-  EXPECT_NE(release_body.find("running = false"), std::string::npos);
-  EXPECT_NE(release_body.find("frame_cv.notify_all("), std::string::npos);
+  const auto release_body = source.substr(release, 1200);
+  // Public stop() wakes waiters; dtor may run async after a short budget.
+  EXPECT_NE(release_body.find("capture->stop("), std::string::npos);
+  EXPECT_NE(release_body.find("shared_ptr"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, TerminateImplStopsBrowserCaptureBeforeIsolatedKill) {
-  // terminate_impl is shared by WebUI disconnect, Moonlight cancel residual,
-  // and browser stop — all must stop media before pidfd kill.
+  // Single media owner before pidfd kill — no second portal release.
   const auto source = read_source_for_contract("src/process.cpp");
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void proc_t::terminate_impl(");
   ASSERT_NE(start, std::string::npos);
   const auto body = source.substr(start, 1600);
-  const auto prepare = body.find("browser_stream::prepare_for_session_teardown(");
-  const auto release = body.find("portal::release_global_capture(");
+  const auto prepare = body.find("session_media::prepare_for_stop(");
   const auto kill = body.find("terminate_isolated_session_generation(");
   ASSERT_NE(prepare, std::string::npos);
-  ASSERT_NE(release, std::string::npos);
   ASSERT_NE(kill, std::string::npos);
-  EXPECT_LT(prepare, release);
-  EXPECT_LT(release, kill);
+  EXPECT_LT(prepare, kill);
+  EXPECT_EQ(body.find("portal::release_global_capture("), std::string::npos);
 }
 
 TEST(SessionStopContractTests, WebUiDisconnectRespondsBeforeCaptureAndForceStop) {
@@ -287,22 +280,20 @@ TEST(SessionStopContractTests, WebUiDisconnectRespondsBeforeCaptureAndForceStop)
   const auto end = source.find("void sendWol(", start);
   ASSERT_NE(end, std::string::npos);
   const auto body = source.substr(start, end - start);
-  const auto prepare = body.find("browser_stream::prepare_for_session_teardown(");
+  const auto schedule = body.find("session_media::schedule(");
+  const auto prepare = body.find("session_media::prepare_for_stop(");
   const auto respond = body.find("send_response(");
   const auto force = body.find("proc::proc.terminate(");
+  ASSERT_NE(schedule, std::string::npos);
   ASSERT_NE(prepare, std::string::npos);
   ASSERT_NE(respond, std::string::npos);
   ASSERT_NE(force, std::string::npos);
-  // SB-2: answer HTTPS before portal/PW teardown and nested kill — release can
-  // hang in pw_thread_loop_stop even with a join budget. Teardown is detached.
-  EXPECT_LT(respond, prepare);
+  EXPECT_LT(respond, schedule);
   EXPECT_LT(prepare, force);
-  EXPECT_NE(body.find("detach"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, BrowserStreamStopRespondsBeforeOwnedAppTerminate) {
-  // SB-2: confighttp must not join/terminate nested compositor before writing
-  // the stop JSON body (gate stream_stop empty body / :47990 wedge).
+  // confighttp must not join/terminate nested compositor before writing stop JSON.
   const auto source = read_source_for_contract("src/confighttp.cpp");
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void postBrowserStreamStop(");
@@ -310,23 +301,24 @@ TEST(SessionStopContractTests, BrowserStreamStopRespondsBeforeOwnedAppTerminate)
   const auto end = source.find("void getVDisplayBackends(", start);
   ASSERT_NE(end, std::string::npos);
   const auto body = source.substr(start, end - start);
-  const auto prepare = body.find("browser_stream::prepare_for_session_teardown(");
+  const auto schedule = body.find("session_media::schedule(");
+  const auto prepare = body.find("session_media::prepare_for_stop(");
   const auto stop = body.find("browser_stream::stop_session(");
   const auto respond = body.find("send_response(");
   const auto terminate = body.find("proc::proc.terminate(");
+  ASSERT_NE(schedule, std::string::npos);
   ASSERT_NE(prepare, std::string::npos);
   ASSERT_NE(stop, std::string::npos);
   ASSERT_NE(respond, std::string::npos);
   ASSERT_NE(terminate, std::string::npos);
-  // Token/helper first, respond, then async prepare + terminate.
   EXPECT_LT(stop, respond);
-  EXPECT_LT(respond, prepare);
+  EXPECT_LT(respond, schedule);
   EXPECT_LT(prepare, terminate);
-  // stop_session must defer app kill and media release on this path.
   EXPECT_NE(body.find("terminate_owned_app"), std::string::npos);
   EXPECT_NE(body.find("release_media"), std::string::npos);
-  // Teardown must leave the HTTPS worker (SimpleWeb flushes on handler return).
-  EXPECT_NE(body.find("detach"), std::string::npos);
+  EXPECT_NE(body.find("media_draining"), std::string::npos);
+  EXPECT_NE(body.find("token_matched"), std::string::npos);
+  // Linux leaves the HTTPS worker via session_media::schedule (not bare .detach).
 }
 
 TEST(SessionStopContractTests, PortalReleaseDestroysCaptureOffHttpCriticalPath) {

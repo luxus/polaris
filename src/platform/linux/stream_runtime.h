@@ -1,9 +1,11 @@
 /**
  * @file src/platform/linux/stream_runtime.h
- * @brief Pluggable private stream compositor runtime (labwc today; gamescope later).
+ * @brief Pluggable private stream compositor runtime (labwc + gamescope).
  *
- * process.cpp and browser_stream should start/stop/wrap sessions through this
- * interface instead of calling labwc symbols directly.
+ * process.cpp and browser_stream must start/stop/wrap sessions through this
+ * interface instead of calling cage_display_router symbols directly.
+ * Labwc-only capture probes may still use cage_display_router free functions
+ * until those probes move behind this facade.
  */
 #pragma once
 

@@ -54,9 +54,9 @@ namespace browser_stream {
   /**
    * @brief Synchronously stop Browser Stream media capture before nested teardown.
    *
-   * SB-2 order: signal shutdown → release portal/PipeWire (async-bounded) →
-   * bounded capture join (≤3s). Must run before gamescope/labwc kill so PipeWire
-   * is not attached into a dying compositor. Prefer calling after HTTP write.
+   * Order: signal shutdown → portal::release_global_capture → bounded join (≤3s).
+   * Prefer session_media::prepare_for_stop() from process/confighttp so concurrent
+   * stop paths do not double-enter. HTTP handlers should schedule after response.
    */
   void prepare_for_session_teardown();
   session_token_t issue_session_token(std::string_view remote_address, std::string_view app_uuid = {}, bool owns_app = false);

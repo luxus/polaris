@@ -26,10 +26,28 @@ JAR="${POLARIS_COOKIE_JAR:-/tmp/polaris-solid-base-gate.cookies}"
 SKIP_BS="${SKIP_BROWSER_STREAM:-0}"
 PREVIEW_ONLY="${PREVIEW_ONLY:-0}"
 SETTLE="${GATE_STREAM_SETTLE_S:-5}"
+# When 1, idle preview fail does not fail the gate (SB-1 residual; stream_preview still required).
+SOFT_IDLE_PREVIEW="${GATE_SOFT_IDLE_PREVIEW:-0}"
+# Optional: gamescope_stream | headless_stream | desktop_display | headless_dongle
+# When unset, read from polaris.conf. Labwc/desktop do not require private gamescope portal units.
+GATE_MODE="${GATE_LINUX_STREAM_MODE:-}"
 RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SAVE_DIR="${GATE_SAVE_DIR:-$REPO_ROOT/images}"
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/polaris/polaris.conf"
+if [[ -z "$GATE_MODE" && -f "$CONF" ]]; then
+  GATE_MODE=$(grep -E '^[[:space:]]*linux_stream_mode[[:space:]]*=' "$CONF" 2>/dev/null \
+    | tail -1 | sed -E 's/.*=[[:space:]]*//' | tr -d '[:space:]' || true)
+fi
+GATE_MODE="${GATE_MODE:-gamescope_stream}"
+# Private gamescope portal stack is required for gamescope_stream; optional elsewhere.
+REQUIRE_PRIVATE_PORTAL=1
+case "$GATE_MODE" in
+  headless_stream|windowed_stream|desktop_display|headless_dongle)
+    REQUIRE_PRIVATE_PORTAL=0
+    ;;
+esac
 
 units_ok=fail
 screencast_ok=fail
@@ -153,17 +171,30 @@ elif DBUS_SESSION_BUS_ADDRESS="unix:path=$RT/polaris-portal/bus" \
   log "polaris-portal unit inactive but Desktop name present on private bus"
 fi
 
-if [[ "$dbus_ok" -eq 1 ]] && [[ "$gs_storm" -eq 0 ]] && { [[ "$gs_unit_active" -eq 1 ]] || [[ "$name_owned" -eq 1 ]]; } \
-  && [[ "$portal_main_ok" -eq 1 ]] && systemctl --user is-active --quiet polaris.service 2>/dev/null; then
-  units_ok=ok
-  log "units ok (dbus=$dbus_ok gs_unit=$gs_unit_active name_owned=$name_owned storm=$gs_storm)"
+if systemctl --user is-active --quiet polaris.service 2>/dev/null; then
+  if [[ "$REQUIRE_PRIVATE_PORTAL" -eq 1 ]]; then
+    if [[ "$dbus_ok" -eq 1 ]] && [[ "$gs_storm" -eq 0 ]] && { [[ "$gs_unit_active" -eq 1 ]] || [[ "$name_owned" -eq 1 ]]; } \
+      && [[ "$portal_main_ok" -eq 1 ]]; then
+      units_ok=ok
+      log "units ok mode=$GATE_MODE (dbus=$dbus_ok gs_unit=$gs_unit_active name_owned=$name_owned storm=$gs_storm)"
+    else
+      units_ok=fail
+      log "units fail mode=$GATE_MODE dbus=$dbus_ok gs_unit=$gs_unit_active name_owned=$name_owned storm=$gs_storm portal_main=$portal_main_ok"
+    fi
+  else
+    units_ok=ok
+    log "units ok mode=$GATE_MODE (private portal not required; polaris active)"
+  fi
 else
   units_ok=fail
-  log "units fail dbus=$dbus_ok gs_unit=$gs_unit_active name_owned=$name_owned storm=$gs_storm portal_main=$portal_main_ok"
+  log "units fail polaris.service not active"
 fi
 
 # --- ScreenCast ---
-if [[ -S "$RT/polaris-portal/bus" ]]; then
+if [[ "$REQUIRE_PRIVATE_PORTAL" -eq 0 ]]; then
+  screencast_ok=ok
+  log "screencast skip/ok mode=$GATE_MODE (private portal not required)"
+elif [[ -S "$RT/polaris-portal/bus" ]]; then
   if DBUS_SESSION_BUS_ADDRESS="unix:path=$RT/polaris-portal/bus" \
       busctl --user introspect org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop 2>/dev/null \
       | grep -q 'org.freedesktop.portal.ScreenCast'; then
@@ -376,7 +407,11 @@ echo "$gate"
 fail=0
 [[ "$units_ok" == ok ]] || fail=1
 [[ "$screencast_ok" == ok ]] || fail=1
-[[ "$preview_ok" == ok ]] || fail=1
+if [[ "$SOFT_IDLE_PREVIEW" != "1" ]]; then
+  [[ "$preview_ok" == ok ]] || fail=1
+elif [[ "$preview_ok" != ok ]]; then
+  log "idle preview soft-fail (GATE_SOFT_IDLE_PREVIEW=1)"
+fi
 [[ "$dual_socket_ok" == ok ]] || fail=1
 if [[ "$SKIP_BS" != "1" && -n "$PASS" ]]; then
   [[ "$stream_start_ok" == ok ]] || fail=1

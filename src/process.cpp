@@ -79,11 +79,9 @@
   #include <sys/stat.h>
   #include <sys/syscall.h>
   #include <unistd.h>
+  #include "platform/linux/session_media.h"
   #ifdef POLARIS_BUILD_PORTAL
-  // portal_grab.cpp — release ScreenCast/PipeWire before nested compositor kill.
-  namespace portal {
-    void release_global_capture();
-  }
+    #include "platform/linux/portal_session.h"
   #endif
 #elif __APPLE__
   #include <mach-o/dyld.h>
@@ -6254,20 +6252,9 @@ namespace proc {
     placebo = false;
 
 #ifdef __linux__
-    // SB-2 ordered teardown (issue #2):
-    // 1) join Browser Stream capture threads (sync)
-    // 2) release portal/PipeWire while compositor is still alive
-    // 3) brief settle
-    // 4) only then pidfd-kill Steam/cage/gamescope
-    // Browser Stream used to stop capture async *after* this kill → polaris
-    // SEGV in pipewire_capture::on_param_changed and gamescope CVulkanDevice dtor.
-    browser_stream::prepare_for_session_teardown();
-#ifdef POLARIS_BUILD_PORTAL
-    // Idempotent if prepare_for_session_teardown already released.
-    portal::release_global_capture();
-#endif
-    // Give PipeWire/gamescope a beat to finish disconnect before SIGTERM.
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Single media owner: signal → portal release → bounded join. Nested kill
+    // only after that (see session_media / SB-2). Do not call portal release again.
+    session_media::prepare_for_stop();
     stop_steam_big_picture_input_guard();
     if (!immediate) {
       terminate_session_owned_steam_before_cage_stop();

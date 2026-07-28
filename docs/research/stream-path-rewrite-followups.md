@@ -1,15 +1,16 @@
 # Stream-path rewrite — follow-ups & live bugs
 
-**Branch:** `feat/linux-stream-runtime` (tip `90d4ca6`; lea gen **440** store `c6m365nm…/polaris-stream` — not old `50zsr6n`)  
-**Last updated:** 2026-07-28 (SB-2 pin `90d4ca6` deployed; stop still fails — hang in portal release)  
-**Host under test:** lea (NVIDIA + KDE + private gamescope portal stack)
+**Branch:** `feat/linux-stream-runtime`  
+**Last updated:** 2026-07-28 (hardening: `session_media` single stop owner + stream_runtime facade for browser_stream; foundation ship with known residuals OK)  
+**Host under test:** lea (NVIDIA + KDE + private gamescope portal stack)  
+**Modularity target:** [`linux-stream-modularity.md`](./linux-stream-modularity.md)
 
 ### Progress snapshot (solid-base-final + multimode)
 
 | SB | Status | Notes |
 |----|--------|--------|
 | #1 Preview | **Residual (issue closed)** | Gate still **preview=fail** idle: API ~32KB / gamescopectl empty. Mid-stream `stream_preview=ok` when a real stream starts. Reopen only if product needs idle preview green again. |
-| #2 Clean stop / RST | **Verified agent stop (lea 4b0647b)** | Gate: `stream_stop=ok webui_stop=ok` with bodies; polaris stays active. Stop/disconnect answer HTTPS then detach portal/PW/app teardown (SimpleWeb flushes on handler return). Residual: gamescope may still SEGV on nested kill; Moonlight cancel not re-proven this pass. |
+| #2 Clean stop / RST | **Code: session_media owner** | HTTPS answers first; `session_media::schedule` + `prepare_for_stop` is the only media path (no double portal release in `terminate_impl`). Residual: PW destroy may still exceed budget on worker; re-prove gate on lea after deploy. |
 | #3 WebUI disconnect | **Blocked by #2** | Same release hang; `webui_stop=fail` empty/timeout. Issue already closed earlier — residual is stop path under #2. |
 | #4 Cancel 470 | **Code landed** | Not re-proven this run (no Moonlight cancel step). |
 | #5 Mode-agnostic apps | **Verified inject/apps (recommend close)** | lea `apps.json` v9: **12** Steam library apps mode-neutral (`steam-appid` + detached `rungameid`); only optional **Steam Big Picture** keeps `polaris-hdr-session`. Inject `polaris-hdr-inject-app`: mode-neutral skip when already unwrapped. **Does not assume gamescope-only** for library titles. E2E labwc/dongle launch of a library game still optional residual. |
