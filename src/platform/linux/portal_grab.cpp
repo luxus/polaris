@@ -65,7 +65,29 @@ namespace portal {
     std::string base = config::sunshine.config_file.empty()
       ? std::string(getenv("HOME") ? getenv("HOME") : "/tmp") + "/.config/sunshine"
       : config::sunshine.config_file.substr(0, config::sunshine.config_file.rfind('/'));
-    return base + "/portal_restore_token.txt";
+    // Private gamescope bus tokens are not valid for host KDE ScreenCast (and vice
+    // versa). Mixing them hangs Start with restore_token=yes and no PipeWire node.
+    const char *private_bus = std::getenv("POLARIS_PORTAL_DBUS_ADDRESS");
+    if (private_bus && *private_bus) {
+      return base + "/portal_restore_token_private.txt";
+    }
+    return base + "/portal_restore_token_host.txt";
+  }
+
+  static bool portal_uses_private_bus() {
+    const char *addr = std::getenv("POLARIS_PORTAL_DBUS_ADDRESS");
+    return addr && *addr;
+  }
+
+  // Host-desktop dongle must not reuse restore tokens from gamescope private portal.
+  static bool portal_should_use_restore_token() {
+    if (!portal_uses_private_bus()) {
+      const auto &mode = config::video.linux_display.stream_mode;
+      if (mode == "headless_dongle" || mode == "desktop_display" || mode == "headless_evdi") {
+        return false;
+      }
+    }
+    return true;
   }
 
   static std::string load_restore_token() {
@@ -669,8 +691,11 @@ namespace portal {
         return resp;
       };
 
-      const bool had_saved_token = !load_restore_token().empty();
-      auto *resp = try_select_sources(next_handle_token("polaris_ss"), true);
+      // Dongle/host monitor path: never feed restore tokens (often from private
+      // gamescope portal) — KDE Start hangs ~client timeout with no PW node.
+      const bool prefer_restore = portal_should_use_restore_token();
+      const bool had_saved_token = prefer_restore && !load_restore_token().empty();
+      auto *resp = try_select_sources(next_handle_token("polaris_ss"), prefer_restore);
       if (!resp) {
         if (had_saved_token) {
           // Policy: always invalidate the on-disk token after SelectSources
@@ -688,11 +713,11 @@ namespace portal {
       g_variant_unref(resp);
     }
 
-    // Step 3: Start (may show window picker — long timeout).
-    // On timeout/failure clear restore_token and retry Start once with a fresh
-    // handle_token so a stuck restore-driven auto-select can recover.
+    // Step 3: Start. Keep timeout under Moonlight's ~10s connect budget so we can
+    // clear tokens and fail closed instead of wedging videoThread → Hang/SIGTRAP.
     BOOST_LOG(info) << "portal: Starting capture (window picker may appear)..."sv;
     {
+      constexpr int start_timeout_ms = 8000;
       auto try_start = [&](const std::string &handle_token) -> GVariant * {
         std::string req_path = make_request_path(session->conn, handle_token);
 
@@ -703,10 +728,10 @@ namespace portal {
 
         auto *result = portal_call_sync(session->conn, "Start",
           g_variant_new("(osa{sv})", session->session_handle.c_str(), "", &builder),
-          120000);
+          start_timeout_ms);
         if (result) g_variant_unref(result);
 
-        return wait_for_response(session->conn, req_path, 120000);
+        return wait_for_response(session->conn, req_path, start_timeout_ms);
       };
 
       auto *resp = try_start(next_handle_token("polaris_st"));
