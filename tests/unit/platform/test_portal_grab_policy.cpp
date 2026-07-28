@@ -23,17 +23,25 @@
 #include "src/platform/linux/pipewire_capture.h"
 
 namespace portal {
-  std::uint32_t capture_type_for_stream_display_for_tests(bool headless_mode, bool use_cage_compositor);
+  std::uint32_t capture_type_for_stream_display_for_tests(bool headless_mode, bool use_cage_compositor,
+                                                         std::string_view stream_mode = {});
   std::uint32_t portal_pick_cursor_mode_for_tests(std::uint32_t available);
 }
 
 TEST(PortalGrabPolicyTests, DesktopDisplayRequestsMonitorSource) {
   EXPECT_EQ(portal::capture_type_for_stream_display_for_tests(false, false), 1u);
+  EXPECT_EQ(portal::capture_type_for_stream_display_for_tests(false, false, "desktop_display"), 1u);
+}
+
+TEST(PortalGrabPolicyTests, DongleRequestsMonitorSourceDespiteHeadlessFlag) {
+  // headless_dongle uses headless_mode for topology privacy, not window capture.
+  EXPECT_EQ(portal::capture_type_for_stream_display_for_tests(true, false, "headless_dongle"), 1u);
 }
 
 TEST(PortalGrabPolicyTests, PrivateAndWindowedCagePathsRequestWindowSource) {
   EXPECT_EQ(portal::capture_type_for_stream_display_for_tests(true, true), 2u);
   EXPECT_EQ(portal::capture_type_for_stream_display_for_tests(false, true), 2u);
+  EXPECT_EQ(portal::capture_type_for_stream_display_for_tests(true, false, "gamescope_stream"), 2u);
 }
 
 // XDG ScreenCast AvailableCursorModes bits: 1=Hidden, 2=Embedded, 4=Metadata.

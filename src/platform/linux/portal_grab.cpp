@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -212,7 +213,16 @@ namespace portal {
   constexpr uint32_t portal_source_monitor = 1;
   constexpr uint32_t portal_source_window = 2;
 
-  static uint32_t capture_type_for_stream_display(bool headless_mode, bool use_cage_compositor) {
+  static uint32_t capture_type_for_stream_display(bool headless_mode, bool use_cage_compositor,
+                                                  std::string_view stream_mode = {}) {
+    // Host-desktop modes stream a physical output after (optional) topology swap.
+    // headless_dongle sets headless_mode for privacy swap but must NOT use window
+    // SelectSources — KDE ScreenCast hangs on Start with type=window + restore_token.
+    const auto mode = stream_mode.empty() ? std::string_view {config::video.linux_display.stream_mode} : stream_mode;
+    if (mode == "headless_dongle" || mode == "desktop_display" || mode == "headless_evdi") {
+      return portal_source_monitor;
+    }
+
     // Plain desktop display mirroring should ask the portal for a monitor/source,
     // not a single app window. Windowed/headless cage paths keep the historical
     // window source because they stream an isolated compositor/window.
@@ -224,15 +234,17 @@ namespace portal {
   }
 
 #if defined(POLARIS_TESTS)
-  uint32_t capture_type_for_stream_display_for_tests(bool headless_mode, bool use_cage_compositor) {
-    return capture_type_for_stream_display(headless_mode, use_cage_compositor);
+  uint32_t capture_type_for_stream_display_for_tests(bool headless_mode, bool use_cage_compositor,
+                                                    std::string_view stream_mode = {}) {
+    return capture_type_for_stream_display(headless_mode, use_cage_compositor, stream_mode);
   }
 #endif
 
   static uint32_t capture_type_for_current_config() {
     return capture_type_for_stream_display(
       config::video.linux_display.headless_mode,
-      config::video.linux_display.use_cage_compositor);
+      config::video.linux_display.use_cage_compositor,
+      config::video.linux_display.stream_mode);
   }
 
   // Helper: call a portal method synchronously via D-Bus
