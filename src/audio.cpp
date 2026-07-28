@@ -246,9 +246,10 @@ namespace audio {
     auto next_audio_route_check = std::chrono::steady_clock::now();
 
     while (!shutdown_event->peek()) {
+      // Discover new session streams occasionally; never thrash (re-pin is sticky).
       if (route_without_default && std::chrono::steady_clock::now() >= next_audio_route_check) {
         control->route_process_audio_to_sink(sink);
-        next_audio_route_check = std::chrono::steady_clock::now() + 1s;
+        next_audio_route_check = std::chrono::steady_clock::now() + 3s;
       }
 
       std::vector<float> sample_buffer;

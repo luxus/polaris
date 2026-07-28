@@ -13,6 +13,7 @@
 #include <optional>
 #include <sstream>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 // lib includes
@@ -751,6 +752,9 @@ namespace platf {
       loop_t loop;
       ctx_t ctx;
       std::string requested_sink;
+      // Sink inputs we already moved (or found on target). Never re-move: EasyEffects
+      // reclaiming a stream every second was thrashing the graph (audible crackle).
+      std::unordered_set<std::uint32_t> routed_sink_inputs;
 
       struct {
         std::uint32_t stereo = PA_INVALID_INDEX;
@@ -1164,7 +1168,13 @@ namespace platf {
             return;
           }
 
+          // Already on capture sink — remember and leave alone.
           if (input_info->sink == *target_sink) {
+            routed_sink_inputs.insert(input_info->index);
+            return;
+          }
+          // Already moved once this session — do not fight EasyEffects reclaim.
+          if (routed_sink_inputs.count(input_info->index) != 0) {
             return;
           }
 
@@ -1209,11 +1219,14 @@ namespace platf {
         }
 
         for (const auto &route : routes) {
+          // Mark before move so EasyEffects reclaim cannot re-queue thrash.
+          routed_sink_inputs.insert(route.index);
+
           BOOST_LOG(info) << "Linux audio isolation: moving session audio stream ["sv
                           << route.app_name << "] pid="sv << route.pid
                           << " sink_input="sv << route.index
                           << " from sink #"sv << route.current_sink
-                          << " to ["sv << sink << ']';
+                          << " to ["sv << sink << "] (once; no re-pin thrash)"sv;
 
           auto move_alarm = safe::make_alarm<int>();
           mainloop_lock_t lock {loop.get()};
