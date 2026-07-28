@@ -4075,45 +4075,47 @@ namespace confighttp {
       BOOST_LOG(info) << "WebUI disconnect: responding before capture/nested teardown"sv;
       send_response(response, output_tree);
 
-      // Nested teardown after the response — log failures, never rewrite body.
-      try {
-        BOOST_LOG(info) << "WebUI disconnect: prepare capture/portal teardown"sv;
-        browser_stream::prepare_for_session_teardown();
+      // Nested teardown after the response — must not block handler return
+      // (SimpleWeb flushes body when the handler finishes).
+      std::thread {[uuid = std::move(uuid)]() {
+        try {
+          BOOST_LOG(info) << "WebUI disconnect: async prepare capture/portal teardown"sv;
+          browser_stream::prepare_for_session_teardown();
 
-        if (!uuid.empty()) {
-          const auto shutdown = proc::proc.request_session_shutdown(uuid, {}, true, false);
-          const bool stopped = shutdown.stopped ||
-                               shutdown.snapshot.outcome == proc::session_stop_outcome_t::allowed ||
-                               shutdown.snapshot.outcome == proc::session_stop_outcome_t::no_active_session;
-          if (!stopped) {
-            BOOST_LOG(info) << "WebUI disconnect: force-stop after outcome="
-                            << static_cast<int>(shutdown.snapshot.outcome);
-            rtsp_stream::terminate_sessions();
-            proc::proc.terminate();
-          }
-          nvhttp::find_and_stop_session(uuid, true);
-        }
-        else {
-          // No uuid: disconnect current active session(s).
-          bool stopped = false;
-          const auto owner = proc::proc.get_session_owner_unique_id();
-          if (!owner.empty()) {
-            const auto shutdown = proc::proc.request_session_shutdown(owner, {}, true, false);
-            stopped = shutdown.stopped ||
-                      shutdown.snapshot.outcome == proc::session_stop_outcome_t::allowed ||
-                      shutdown.snapshot.outcome == proc::session_stop_outcome_t::no_active_session;
-          }
-          if (!stopped) {
-            BOOST_LOG(info) << "WebUI disconnect: force-stop active session(s)"sv;
-            rtsp_stream::terminate_sessions();
-            if (proc::proc.running() > 0) {
+          if (!uuid.empty()) {
+            const auto shutdown = proc::proc.request_session_shutdown(uuid, {}, true, false);
+            const bool stopped = shutdown.stopped ||
+                                 shutdown.snapshot.outcome == proc::session_stop_outcome_t::allowed ||
+                                 shutdown.snapshot.outcome == proc::session_stop_outcome_t::no_active_session;
+            if (!stopped) {
+              BOOST_LOG(info) << "WebUI disconnect: force-stop after outcome="
+                              << static_cast<int>(shutdown.snapshot.outcome);
+              rtsp_stream::terminate_sessions();
               proc::proc.terminate();
             }
+            nvhttp::find_and_stop_session(uuid, true);
           }
+          else {
+            bool stopped = false;
+            const auto owner = proc::proc.get_session_owner_unique_id();
+            if (!owner.empty()) {
+              const auto shutdown = proc::proc.request_session_shutdown(owner, {}, true, false);
+              stopped = shutdown.stopped ||
+                        shutdown.snapshot.outcome == proc::session_stop_outcome_t::allowed ||
+                        shutdown.snapshot.outcome == proc::session_stop_outcome_t::no_active_session;
+            }
+            if (!stopped) {
+              BOOST_LOG(info) << "WebUI disconnect: force-stop active session(s)"sv;
+              rtsp_stream::terminate_sessions();
+              if (proc::proc.running() > 0) {
+                proc::proc.terminate();
+              }
+            }
+          }
+        } catch (const std::exception &e) {
+          BOOST_LOG(warning) << "WebUI disconnect: nested force-stop failed: "sv << e.what();
         }
-      } catch (const std::exception &e) {
-        BOOST_LOG(warning) << "WebUI disconnect: nested force-stop failed: "sv << e.what();
-      }
+      }}.detach();
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Disconnect: "sv << e.what();
       bad_request(response, request, e.what());
@@ -4599,13 +4601,22 @@ namespace confighttp {
                     << result.stopped << " owns_app="sv << result.owns_app;
     send_response(response, output);
 
-    BOOST_LOG(info) << "BrowserStreamStop: prepare capture/portal teardown"sv;
-    browser_stream::prepare_for_session_teardown();
-
-    if (result.owns_app) {
-      BOOST_LOG(info) << "BrowserStreamStop: terminate owned app after HTTP response"sv;
-      proc::proc.terminate(false, false);
-    }
+    // SimpleWeb may not flush the body until this handler returns. Never run
+    // portal/PW/app kill on the HTTPS worker — detach teardown so curl gets
+    // a body even when pw_thread_loop_stop blocks for minutes.
+    const bool owns_app = result.owns_app;
+    std::thread {[owns_app]() {
+      try {
+        BOOST_LOG(info) << "BrowserStreamStop: async prepare capture/portal teardown"sv;
+        browser_stream::prepare_for_session_teardown();
+        if (owns_app) {
+          BOOST_LOG(info) << "BrowserStreamStop: async terminate owned app"sv;
+          proc::proc.terminate(false, false);
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "BrowserStreamStop: async teardown failed: "sv << e.what();
+      }
+    }}.detach();
   }
 
   /**

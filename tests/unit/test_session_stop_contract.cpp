@@ -294,9 +294,10 @@ TEST(SessionStopContractTests, WebUiDisconnectRespondsBeforeCaptureAndForceStop)
   ASSERT_NE(respond, std::string::npos);
   ASSERT_NE(force, std::string::npos);
   // SB-2: answer HTTPS before portal/PW teardown and nested kill — release can
-  // hang in pw_thread_loop_stop even with a join budget.
+  // hang in pw_thread_loop_stop even with a join budget. Teardown is detached.
   EXPECT_LT(respond, prepare);
   EXPECT_LT(prepare, force);
+  EXPECT_NE(body.find("detach"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, BrowserStreamStopRespondsBeforeOwnedAppTerminate) {
@@ -317,13 +318,15 @@ TEST(SessionStopContractTests, BrowserStreamStopRespondsBeforeOwnedAppTerminate)
   ASSERT_NE(stop, std::string::npos);
   ASSERT_NE(respond, std::string::npos);
   ASSERT_NE(terminate, std::string::npos);
-  // Token/helper first, respond, then prepare + terminate.
+  // Token/helper first, respond, then async prepare + terminate.
   EXPECT_LT(stop, respond);
   EXPECT_LT(respond, prepare);
   EXPECT_LT(prepare, terminate);
   // stop_session must defer app kill and media release on this path.
   EXPECT_NE(body.find("terminate_owned_app"), std::string::npos);
   EXPECT_NE(body.find("release_media"), std::string::npos);
+  // Teardown must leave the HTTPS worker (SimpleWeb flushes on handler return).
+  EXPECT_NE(body.find("detach"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, PortalReleaseDestroysCaptureOffHttpCriticalPath) {
