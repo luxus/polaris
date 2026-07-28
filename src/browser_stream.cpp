@@ -1368,7 +1368,7 @@ namespace browser_stream {
       return state;
     }
 
-    void finish_video_capture_stop(std::unique_ptr<capture_state_t> state) {
+    void finish_video_capture_stop_join(std::unique_ptr<capture_state_t> state) {
       if (!state) {
         return;
       }
@@ -1395,8 +1395,47 @@ namespace browser_stream {
       }
     }
 
+    // Join capture threads, but never block the HTTP/lifecycle thread past
+    // `timeout` (SB-2: unbounded join hung :47990 → 10s force-shutdown SIGTRAP).
+    // On timeout, hand ownership to a detached joiner so state lifetime is safe.
+    void finish_video_capture_stop(
+      std::unique_ptr<capture_state_t> state,
+      std::chrono::milliseconds timeout = std::chrono::milliseconds {0}
+    ) {
+      if (!state) {
+        return;
+      }
+      if (timeout.count() <= 0) {
+        finish_video_capture_stop_join(std::move(state));
+        return;
+      }
+
+      auto done = std::make_shared<std::atomic<bool>>(false);
+      std::thread joiner {[state = std::move(state), done]() mutable {
+        finish_video_capture_stop_join(std::move(state));
+        done->store(true, std::memory_order_release);
+      }};
+      const auto deadline = std::chrono::steady_clock::now() + timeout;
+      while (!done->load(std::memory_order_acquire) &&
+             std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      if (done->load(std::memory_order_acquire)) {
+        if (joiner.joinable()) {
+          joiner.join();
+        }
+      }
+      else {
+        BOOST_LOG(warning) << "Browser Stream capture join exceeded "
+                           << timeout.count()
+                           << "ms; continuing teardown without blocking HTTPS"sv;
+        joiner.detach();
+      }
+    }
+
     void stop_video_capture() {
-      finish_video_capture_stop(take_capture_state_for_stop());
+      // Synchronous path used from prepare; bound so stop handlers return.
+      finish_video_capture_stop(take_capture_state_for_stop(), 3s);
     }
 
     void stop_video_capture_async() {
@@ -1405,7 +1444,7 @@ namespace browser_stream {
         return;
       }
       std::thread {[state = std::move(state)]() mutable {
-        finish_video_capture_stop(std::move(state));
+        finish_video_capture_stop_join(std::move(state));
       }}.detach();
     }
 
@@ -1566,15 +1605,19 @@ namespace browser_stream {
 
   void prepare_for_session_teardown() {
 #ifdef __linux__
-    // Join video/audio capture *before* any nested compositor kill. The async
-    // path left portal PipeWire attached while pidfd SIGTERM'd gamescope →
-    // pipewire_capture::on_param_changed → pw_stream_queue_buffer SEGV and
-    // gamescope CVulkanDevice dtor SEGV (SB-2 / issue #2).
+    // Ordered stop (SB-2 / issue #2):
+    // 1) signal capture shutdown (mail::shutdown)
+    // 2) release portal/PipeWire so capture loops wake (running=false + notify)
+    // 3) join capture threads with a bound (never hang HTTPS past force-shutdown)
+    // 4) only then may terminate_impl pidfd-kill gamescope/labwc
+    // Previous order joined *before* portal release → hang in stop_video_capture
+    // while PW stayed attached into a dying compositor (SIGTRAP + gamescope SEGV).
     const bool had_media = video_capture_active() || audio_capture_active();
-    stop_video_capture();
+    auto state = take_capture_state_for_stop();
 #ifdef POLARIS_BUILD_PORTAL
     portal::release_global_capture();
 #endif
+    finish_video_capture_stop(std::move(state), 3s);
     // Only settle when we actually dropped a live capture — avoids stacking
     // 100ms delays when prepare is called from stop + terminate + disconnect.
     if (had_media) {

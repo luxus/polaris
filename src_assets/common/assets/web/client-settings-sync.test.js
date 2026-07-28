@@ -37,15 +37,24 @@ describe('client settings sync helpers', () => {
     })).toBe('desktop_display')
   })
 
-  it('registers gamescope_stream as unavailable and maps labwc private runtime on apply', () => {
-    expect(streamDisplayModeAvailable('gamescope_stream')).toBe(false)
+  it('registers gamescope_stream as selectable and maps private runtimes on apply', () => {
+    // Client-side allow-list: gamescope is selectable (host still probes PATH).
+    // Family/EVDI remain reserved until those paths ship.
+    expect(streamDisplayModeAvailable('gamescope_stream')).toBe(true)
+    expect(streamDisplayModeAvailable('family_isolated')).toBe(false)
+    expect(streamDisplayModeAvailable('headless_evdi')).toBe(false)
     expect(labelForStreamDisplayMode('gamescope_stream')).toBe('Gamescope Stream')
 
-    const applied = applyStreamDisplayModeToConfig({}, 'headless_stream')
-    expect(applied.linux_stream_mode).toBe('headless_stream')
-    expect(applied.linux_private_runtime).toBe('labwc')
-    expect(applied.headless_mode).toBe('enabled')
-    expect(applied.linux_use_cage_compositor).toBe('enabled')
+    const labwc = applyStreamDisplayModeToConfig({}, 'headless_stream')
+    expect(labwc.linux_stream_mode).toBe('headless_stream')
+    expect(labwc.linux_private_runtime).toBe('labwc')
+    expect(labwc.headless_mode).toBe('enabled')
+    expect(labwc.linux_use_cage_compositor).toBe('enabled')
+
+    const gamescope = applyStreamDisplayModeToConfig({}, 'gamescope_stream')
+    expect(gamescope.linux_stream_mode).toBe('gamescope_stream')
+    expect(gamescope.linux_private_runtime).toBe('gamescope')
+    expect(gamescope.linux_use_cage_compositor).toBe('disabled')
   })
 
   it('labels GPU-native as a Private Stream capture capability', () => {

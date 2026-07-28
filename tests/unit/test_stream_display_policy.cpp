@@ -168,6 +168,24 @@ TEST(StreamDisplayPolicyTests, AllowedLaunchModesExcludeUnavailableByDefault) {
   EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "headless_evdi"), allowed.end());
 }
 
+TEST(StreamDisplayPolicyTests, ModeOptionsMatchSelectionAvailableForGamescope) {
+  // Dual-truth footgun: mode_options must apply the same gamescope_present
+  // probe as selection_available / apply_selection.
+  const auto options = stream_display_policy::mode_options(false);
+  const auto gamescope = std::find_if(options.begin(), options.end(), [](const auto &opt) {
+    return opt.value == "gamescope_stream";
+  });
+  ASSERT_NE(gamescope, options.end());
+  EXPECT_EQ(gamescope->available, stream_display_policy::selection_available("gamescope_stream"));
+  if (!gamescope->available) {
+    EXPECT_FALSE(gamescope->unavailable_reason.empty());
+  }
+
+  const auto allowed = stream_display_policy::allowed_launch_modes(true, false);
+  const bool listed = std::find(allowed.begin(), allowed.end(), "gamescope_stream") != allowed.end();
+  EXPECT_EQ(listed, gamescope->available);
+}
+
 TEST(StreamDisplayPolicyTests, ModeOptionsExposeRuntimeCaptureTopologyForPlugins) {
   const auto options = stream_display_policy::mode_options(false);
   const auto gamescope = std::find_if(options.begin(), options.end(), [](const auto &opt) {

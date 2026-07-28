@@ -397,9 +397,13 @@ namespace stream_path {
       if (!opt.available) {
         continue;
       }
-      // Do not hard-disable labwc paths when the binary is missing — still show them
-      // so the user can install labwc; availability of *reserved* paths stays false.
-      (void) caps;
+      // Gamescope is only selectable when the binary is on PATH (matches
+      // selection_available / resolve_path / apply_selection). Labwc paths stay
+      // listed when the binary is missing so the UI can guide install.
+      if (opt.runtime == runtime_kind_e::GAMESCOPE && !caps.gamescope_present) {
+        opt.available = false;
+        opt.unavailable_reason = "gamescope binary not found on PATH";
+      }
     }
     return options;
   }

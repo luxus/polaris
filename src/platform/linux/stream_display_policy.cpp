@@ -455,7 +455,11 @@ namespace stream_display_policy {
   std::vector<std::string> allowed_launch_modes(bool virtual_display_available,
                                                 bool include_unavailable) {
     std::vector<std::string> modes;
-    for (const auto &path : stream_path::registry()) {
+    auto caps = stream_path::probe_host_capabilities();
+    caps.virtual_display_available = virtual_display_available;
+    // Use options_for_host so gamescope_present (and future host probes) match
+    // mode_options / selection_available — no dual-truth availability.
+    for (const auto &path : stream_path::options_for_host(caps)) {
       if (!path.available && !include_unavailable) {
         continue;
       }
@@ -466,10 +470,7 @@ namespace stream_display_policy {
       if (path.id == stream_path::k_host_virtual_display && !virtual_display_available) {
         continue;
       }
-      if (!path.available) {
-        continue;
-      }
-      // Dongle is always listable; apply auto-fills outputs when possible.
+      // Dongle is always listable when available; apply auto-fills outputs.
       modes.emplace_back(path.id);
     }
     return modes;

@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -1098,14 +1099,17 @@ namespace portal {
 
   static std::mutex g_portal_mu;
   static std::unique_ptr<portal_session_t> g_portal;
-  static std::unique_ptr<pw_capture_t> g_capture;
+  // shared_ptr so ensure_global_capture waiters and the capture() loop can hold
+  // a live ref while release_global_capture drops the global (no UAF on
+  // negotiated / frame_mtx during concurrent teardown — research SB-2).
+  static std::shared_ptr<pw_capture_t> g_capture;
   static uint32_t g_node_id = 0;
 
   // SB-2: release PipeWire + portal Session *before* gamescope/labwc is killed.
   // Holding a live PW stream into a dying compositor SEGV's gamescope
   // (CVulkanDevice dtor) and occasionally polaris itself.
   void release_global_capture() {
-    std::unique_ptr<pw_capture_t> capture;
+    std::shared_ptr<pw_capture_t> capture;
     std::unique_ptr<portal_session_t> portal;
     {
       std::lock_guard lock(g_portal_mu);
@@ -1117,8 +1121,15 @@ namespace portal {
       portal = std::move(g_portal);
       g_node_id = 0;
     }
+    // Stop the capture loop before dropping our ref so waiters wake and exit
+    // instead of blocking join past force-shutdown.
+    if (capture) {
+      capture->running = false;
+      capture->frame_cv.notify_all();
+    }
     // Destructors outside the mutex: PW loop stop can take a moment and must
     // not serialize against a concurrent re-acquire on the next stream.
+    // If capture() still holds a shared_ptr, dtor runs when that loop exits.
     capture.reset();
     portal.reset();
   }
@@ -1144,13 +1155,13 @@ namespace portal {
     return ensure_global_session_unlocked();
   }
 
-  static pw_capture_t *ensure_global_capture(int width, int height) {
-    pw_capture_t *cap = nullptr;
+  static std::shared_ptr<pw_capture_t> ensure_global_capture(int width, int height) {
+    std::shared_ptr<pw_capture_t> cap;
     {
       std::lock_guard lock(g_portal_mu);
       // If capture is running and healthy, reuse it
       if (g_capture && g_capture->running) {
-        return g_capture.get();
+        return g_capture;
       }
 
       // PipeWire stream died or never created — need a fresh portal session
@@ -1168,16 +1179,18 @@ namespace portal {
         BOOST_LOG(warning) << "portal: Failed to start PipeWire capture"sv;
         return nullptr;
       }
-      cap = g_capture.get();
+      cap = g_capture;
     }
 
     // Format negotiation outside the mutex so release_global_capture can run.
-    for (int i = 0; i < 100 && cap && !cap->negotiated; ++i) {
+    // Hold shared_ptr across the wait — never touch a raw pointer after unlock.
+    for (int i = 0; i < 100 && cap && !cap->negotiated.load(); ++i) {
       std::this_thread::sleep_for(100ms);
     }
 
     std::lock_guard lock(g_portal_mu);
-    return (g_capture && g_capture.get() == cap) ? g_capture.get() : nullptr;
+    // If release_global_capture raced us, drop the orphan (caller must not use it).
+    return (g_capture == cap) ? g_capture : nullptr;
   }
 
   // -----------------------------------------------------------------------
@@ -1215,12 +1228,12 @@ namespace portal {
             return -1;
           }
 
-          auto *cap = ensure_global_capture(cfg_width, cfg_height);
+          auto cap = ensure_global_capture(cfg_width, cfg_height);
           if (!cap) {
             return -1;
           }
 
-          if (cap->negotiated && cap->frame_width > 0 && cap->frame_height > 0) {
+          if (cap->negotiated.load() && cap->frame_width > 0 && cap->frame_height > 0) {
             cfg_width = cap->frame_width;
             cfg_height = cap->frame_height;
           }
@@ -1284,13 +1297,15 @@ namespace portal {
         return platf::capture_e::reinit;
       }
 
-      auto *cap = ensure_global_capture(cfg_width, cfg_height);
+      // Hold shared_ptr for the full capture loop so release_global_capture
+      // cannot free frame_mtx/negotiated under us (UAF / SEGV on stop).
+      auto cap = ensure_global_capture(cfg_width, cfg_height);
       if (!cap) {
         BOOST_LOG(warning) << "portal: No capture available"sv;
         return platf::capture_e::reinit;
       }
 
-      if (cap->negotiated && cap->frame_width > 0 && cap->frame_height > 0) {
+      if (cap->negotiated.load() && cap->frame_width > 0 && cap->frame_height > 0) {
         cfg_width = cap->frame_width;
         cfg_height = cap->frame_height;
         this->env_width = cfg_width;
@@ -1299,11 +1314,17 @@ namespace portal {
         this->height = cfg_height;
       }
 
-      while (cap && cap->running) {
-        // Wait for a frame (up to 1 second)
+      while (cap && cap->running.load()) {
+        // Wait for a frame (up to 1 second); also wake when release sets running=false
         std::unique_lock lk(cap->frame_mtx);
         if (!cap->frame_available) {
-          cap->frame_cv.wait_for(lk, 1s, [&] { return cap->frame_available; });
+          cap->frame_cv.wait_for(lk, 1s, [&] {
+            return cap->frame_available || !cap->running.load();
+          });
+        }
+
+        if (!cap->running.load()) {
+          return platf::capture_e::ok;
         }
 
         if (!cap->frame_available) {

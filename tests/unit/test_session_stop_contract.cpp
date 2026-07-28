@@ -223,15 +223,40 @@ TEST(SessionStopContractTests, BrowserStreamStopJoinsCaptureBeforeAppTerminate) 
   EXPECT_EQ(body.find("stop_video_capture_async("), std::string::npos);
 }
 
-TEST(SessionStopContractTests, PrepareForSessionTeardownIsSynchronous) {
+TEST(SessionStopContractTests, PrepareForSessionTeardownReleasesPortalBeforeJoin) {
+  // SB-2 hang residual: joining capture before portal release blocked HTTPS
+  // until 10s force-shutdown SIGTRAP. Order must be: take state → release
+  // portal → bounded join (never async on this path).
   const auto source = read_source_for_contract("src/browser_stream.cpp");
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void prepare_for_session_teardown()");
   ASSERT_NE(start, std::string::npos);
-  const auto body = source.substr(start, 600);
-  EXPECT_NE(body.find("stop_video_capture("), std::string::npos);
+  const auto body = source.substr(start, 1200);
+  const auto take = body.find("take_capture_state_for_stop(");
+  const auto release = body.find("release_global_capture(");
+  const auto join = body.find("finish_video_capture_stop(");
+  ASSERT_NE(take, std::string::npos);
+  ASSERT_NE(release, std::string::npos);
+  ASSERT_NE(join, std::string::npos);
+  EXPECT_LT(take, release);
+  EXPECT_LT(release, join);
   EXPECT_EQ(body.find("stop_video_capture_async("), std::string::npos);
-  EXPECT_NE(body.find("release_global_capture("), std::string::npos);
+  // Bounded join so HTTP cannot hang forever (3s budget).
+  EXPECT_NE(body.find("3s"), std::string::npos);
+}
+
+TEST(SessionStopContractTests, PortalGlobalCaptureUsesSharedOwnership) {
+  // ensure_global_capture must not wait on a raw pointer while
+  // release_global_capture can destroy g_capture (UAF on negotiated).
+  const auto source = read_portal_grab_source_for_contract();
+  ASSERT_FALSE(source.empty());
+  EXPECT_NE(source.find("static std::shared_ptr<pw_capture_t> g_capture"), std::string::npos);
+  EXPECT_NE(source.find("static std::shared_ptr<pw_capture_t> ensure_global_capture"), std::string::npos);
+  const auto release = source.find("void release_global_capture()");
+  ASSERT_NE(release, std::string::npos);
+  const auto release_body = source.substr(release, 900);
+  EXPECT_NE(release_body.find("running = false"), std::string::npos);
+  EXPECT_NE(release_body.find("frame_cv.notify_all("), std::string::npos);
 }
 
 TEST(SessionStopContractTests, TerminateImplStopsBrowserCaptureBeforeIsolatedKill) {

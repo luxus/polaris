@@ -29,7 +29,7 @@ namespace stream_path {
   enum class runtime_kind_e {
     NONE,  ///< Host desktop or host virtual output; no private compositor
     LABWC,  ///< Private labwc (cage_display_router)
-    GAMESCOPE,  ///< Private or attach gamescope (future / external today)
+    GAMESCOPE,  ///< Private or attach gamescope (stream_runtime_gamescope)
   };
 
   /**
@@ -70,7 +70,7 @@ namespace stream_path {
     bool prefer_gpu_native = false;
     /// Request true-headless private runtime when runtime is LABWC/GAMESCOPE.
     bool request_headless = false;
-    /// Path is shipped but not ready to select (e.g. gamescope ownership).
+    /// Path is shipped but not ready to select (reserved EVDI/Family, or host probe failed).
     bool available = true;
     std::string_view unavailable_reason;
     /// UI group hint: private | host | advanced | experimental
