@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, inject } from 'vue'
+import { ref, computed, inject, watch, onMounted } from 'vue'
 import { $tp } from '../../platform-i18n'
 import PlatformLayout from '../../PlatformLayout.vue'
 import AdapterNameSelector from './audiovideo/AdapterNameSelector.vue'
@@ -274,6 +274,39 @@ function setAutoQuality(enabled) {
   setEnabledConfig('ai_enabled', enabled)
 }
 
+const dongleOutputs = ref([])
+const dongleDetectStatus = ref('')
+
+async function refreshDongleOutputs() {
+  dongleDetectStatus.value = 'Detecting…'
+  try {
+    const res = await fetch('/api/linux/display-outputs', { credentials: 'include' })
+    const data = await res.json()
+    if (!data?.status) {
+      dongleDetectStatus.value = 'Detection failed'
+      return
+    }
+    dongleOutputs.value = data.outputs || []
+    // Auto-fill empty fields from host discovery (sysfs DRM).
+    if (!config.value.linux_streaming_output && data.suggested_streaming_output) {
+      config.value.linux_streaming_output = data.suggested_streaming_output
+    }
+    if (!config.value.linux_primary_output && data.suggested_primary_output) {
+      config.value.linux_primary_output = data.suggested_primary_output
+    }
+    if (!config.value.headless_swap_mode) {
+      config.value.headless_swap_mode = 'privacy'
+    }
+    config.value.linux_auto_manage_displays = 'enabled'
+    const n = dongleOutputs.value.filter((o) => o.connected).length
+    dongleDetectStatus.value = n
+      ? `Found ${n} connected connector(s); suggestions applied if fields were empty`
+      : 'No connected connectors reported (plug dongle / check DRM)'
+  } catch (e) {
+    dongleDetectStatus.value = 'Detection request failed'
+  }
+}
+
 function setStreamDisplayMode(mode) {
   if (!streamDisplayModeAvailable(mode)) {
     return
@@ -295,7 +328,22 @@ function setStreamDisplayMode(mode) {
   if (next.capture) {
     config.value.capture = next.capture
   }
+  if (mode === 'headless_dongle') {
+    refreshDongleOutputs()
+  }
 }
+
+watch(streamDisplayMode, (mode) => {
+  if (mode === 'headless_dongle' && dongleOutputs.value.length === 0) {
+    refreshDongleOutputs()
+  }
+})
+
+onMounted(() => {
+  if (streamDisplayMode.value === 'headless_dongle') {
+    refreshDongleOutputs()
+  }
+})
 
 function applyDisplayPlan(choice) {
   if (!choice?.safe) return
@@ -384,28 +432,63 @@ const validateFallbackMode = (event) => {
             class="settings-subtle-surface space-y-3"
             data-dongle-outputs
           >
-            <div class="section-kicker">Dongle outputs</div>
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div class="section-kicker">Dongle outputs</div>
+              <button
+                type="button"
+                class="focus-ring rounded-lg border border-storm/40 px-2 py-1 text-xs text-silver hover:border-ice"
+                @click="refreshDongleOutputs"
+              >
+                Detect connectors
+              </button>
+            </div>
             <p class="text-sm text-storm">
-              Set the dummy-plug connector and your real panel. Save config after editing.
-              Names must match <code class="text-ice">kscreen-doctor -o</code> (e.g. HDMI-A-1, DP-3).
+              Auto-detect uses DRM sysfs (fast). Pick the dummy plug as streaming and the real panel as primary, then save.
             </p>
+            <p v-if="dongleDetectStatus" class="text-xs text-ice">{{ dongleDetectStatus }}</p>
             <div class="grid gap-3 sm:grid-cols-2">
               <label class="block text-sm text-storm">
                 Streaming output (dongle)
+                <select
+                  v-model="config.linux_streaming_output"
+                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                >
+                  <option value="">— select —</option>
+                  <option
+                    v-for="o in dongleOutputs"
+                    :key="'s-' + o.name"
+                    :value="o.name"
+                  >
+                    {{ o.name }}{{ o.connected ? ' (connected)' : '' }}{{ o.likely_dongle ? ' · dongle?' : '' }}{{ o.suggested_streaming ? ' · suggested' : '' }}
+                  </option>
+                </select>
                 <input
                   v-model="config.linux_streaming_output"
                   type="text"
-                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
-                  placeholder="HDMI-A-1"
+                  class="mt-2 w-full rounded-lg border border-storm/40 bg-void/40 px-3 py-1.5 font-mono text-xs text-silver"
+                  placeholder="or type e.g. HDMI-A-2"
                 />
               </label>
               <label class="block text-sm text-storm">
                 Primary output (real panel)
+                <select
+                  v-model="config.linux_primary_output"
+                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                >
+                  <option value="">— select —</option>
+                  <option
+                    v-for="o in dongleOutputs"
+                    :key="'p-' + o.name"
+                    :value="o.name"
+                  >
+                    {{ o.name }}{{ o.connected ? ' (connected)' : '' }}{{ o.enabled ? ' · enabled' : '' }}{{ o.suggested_primary ? ' · suggested' : '' }}
+                  </option>
+                </select>
                 <input
                   v-model="config.linux_primary_output"
                   type="text"
-                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
-                  placeholder="DP-3"
+                  class="mt-2 w-full rounded-lg border border-storm/40 bg-void/40 px-3 py-1.5 font-mono text-xs text-silver"
+                  placeholder="or type e.g. DP-3"
                 />
               </label>
               <label class="block text-sm text-storm sm:col-span-2">

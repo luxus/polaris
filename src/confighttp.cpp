@@ -82,6 +82,7 @@
   #include "platform/linux/session_manager.h"
   #include "platform/linux/cage_display_router.h"
   #include "platform/linux/stream_display_policy.h"
+  #include "platform/linux/display_topology.h"
   #include "platform/linux/wayland.h"
 #endif
 
@@ -5426,6 +5427,45 @@ namespace confighttp {
     server.resource["^/api/webrtc/status$"]["GET"] = getBrowserStreamStatus;
     server.resource["^/api/display/screenshot$"]["GET"] = getDisplayScreenshot;
     server.resource["^/api/display/stream$"]["GET"] = getDisplayStream;
+#ifdef __linux__
+    server.resource["^/api/linux/display-outputs$"]["GET"] = [](resp_https_t response, req_https_t request) {
+      if (!authenticate(response, request)) {
+        return;
+      }
+      print_req(request);
+      nlohmann::json output;
+      output["status"] = true;
+      nlohmann::json arr = nlohmann::json::array();
+      for (const auto &o : display_topology::list_outputs()) {
+        arr.push_back({
+          {"name", o.name},
+          {"drm_path", o.drm_path},
+          {"connected", o.connected},
+          {"enabled", o.enabled},
+          {"likely_dongle", o.likely_dongle},
+          {"suggested_primary", o.suggested_primary},
+          {"suggested_streaming", o.suggested_streaming},
+        });
+      }
+      output["outputs"] = std::move(arr);
+      output["streaming_output"] = config::video.linux_display.streaming_output;
+      output["primary_output"] = config::video.linux_display.primary_output;
+      // Suggestions when config empty
+      std::string sug_stream;
+      std::string sug_primary;
+      for (const auto &o : display_topology::list_outputs()) {
+        if (o.suggested_streaming) {
+          sug_stream = o.name;
+        }
+        if (o.suggested_primary) {
+          sug_primary = o.name;
+        }
+      }
+      output["suggested_streaming_output"] = sug_stream;
+      output["suggested_primary_output"] = sug_primary;
+      send_response(response, output);
+    };
+#endif
     server.resource["^/api/vdisplay/status$"]["GET"] = getVDisplayStatus;
     server.resource["^/api/vdisplay/backends$"]["GET"] = getVDisplayBackends;
     server.resource["^/api/vdisplay/create$"]["POST"] = withCsrf(createVDisplay);

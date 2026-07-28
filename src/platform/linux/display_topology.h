@@ -11,8 +11,30 @@
 
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace display_topology {
+
+  struct output_info_t {
+    std::string name;  ///< Connector name as used by kscreen-doctor (e.g. HDMI-A-2)
+    std::string drm_path;  ///< sysfs name (e.g. card1-HDMI-A-2)
+    bool connected = false;
+    bool enabled = false;
+    bool likely_dongle = false;  ///< Heuristic: connected HDMI/DP dummy-style plug
+    bool suggested_primary = false;
+    bool suggested_streaming = false;
+  };
+
+  /**
+   * @brief List DRM connectors from sysfs (fast; does not hang like kscreen-doctor on some hosts).
+   */
+  std::vector<output_info_t> list_outputs();
+
+  /**
+   * @brief Fill empty streaming_output / primary_output from discovery when possible.
+   * @return true if both fields are non-empty after the call.
+   */
+  bool ensure_dongle_outputs_configured();
 
   /**
    * @brief Whether privacy swap mode makes the streaming output primary and blanks primary.
@@ -37,7 +59,7 @@ namespace display_topology {
   void restore_after_stream();
 
   /**
-   * @brief Whether a kscreen-doctor-visible output with this name exists.
+   * @brief Whether a connector with this name is present (sysfs or kscreen).
    */
   bool output_present(const std::string &name);
 

@@ -5,6 +5,7 @@
 
 #include "stream_display_policy.h"
 
+#include "display_topology.h"
 #include "stream_path.h"
 #include "src/config.h"
 #include "virtual_display.h"
@@ -359,10 +360,10 @@ namespace stream_display_policy {
       }
     }
 
-    // Dongle path needs outputs configured before we commit.
+    // Dongle path: auto-detect connectors from DRM if unset (sysfs), then validate.
     if (key == stream_path::k_headless_dongle) {
-      if (linux_display.streaming_output.empty() || linux_display.primary_output.empty()) {
-        error = "headless_dongle requires linux_streaming_output (dongle) and linux_primary_output (real panel) in config";
+      if (!display_topology::ensure_dongle_outputs_configured()) {
+        error = "headless_dongle: could not auto-detect distinct dongle and panel outputs; set linux_streaming_output and linux_primary_output (see kscreen-doctor -o / sysfs drm)";
         return false;
       }
       if (linux_display.streaming_output == linux_display.primary_output) {
@@ -373,7 +374,6 @@ namespace stream_display_policy {
       if (linux_display.headless_swap_mode.empty()) {
         linux_display.headless_swap_mode = "privacy";
       }
-      // Prefer KMS capture of the dongle connector by name.
       if (config::video.capture.empty() || config::video.capture == "portal") {
         config::video.capture = "kms";
       }
@@ -469,14 +469,7 @@ namespace stream_display_policy {
       if (!path.available) {
         continue;
       }
-      // Dongle only when outputs are configured (else clients would pick a broken path).
-      if (path.id == stream_path::k_headless_dongle) {
-        const auto &cfg = config::video.linux_display;
-        if (cfg.streaming_output.empty() || cfg.primary_output.empty() ||
-            cfg.streaming_output == cfg.primary_output) {
-          continue;
-        }
-      }
+      // Dongle is always listable; apply auto-fills outputs when possible.
       modes.emplace_back(path.id);
     }
     return modes;

@@ -19,6 +19,8 @@ starts at `v1.0.0`.
 - Enable **Gamescope Stream** ownership: attach to idle `gamescope-0` or spawn headless gamescope; wrap app launches into that runtime.
 - Dashboard preview tries labwc, gamescope-0/1, host Wayland (grim), then spectacle — works across stream paths.
 - Web UI: selectable path cards write full config (including dongle outputs and gamescope/portal capture).
+- Dongle path: DRM sysfs connector discovery + `/api/linux/display-outputs` with auto-suggest; apply auto-fills empty outputs.
+- Gamescope runtime: attach idle `gamescope-0` first (start `polaris-hdr-idle` if needed); never use `gamescope-1` for portal.
 
 ## v1.3.1 - 2026-07-12
 

@@ -84,14 +84,13 @@ namespace stream_runtime {
           return true;
         }
 
-        // Attach path: idle unit already owns gamescope-0.
-        if (socket_exists("gamescope-0")) {
-          owned_ = false;
-          socket_name_ = "gamescope-0";
-          x11_display_ = detect_x11_display();
-          pid_ = 0;
-          refresh_runtime_state(params);
-          BOOST_LOG(info) << "gamescope_runtime: attached to existing gamescope-0"sv;
+        // 1) Prefer attach to idle gamescope-0 (portal + polaris-hdr.env contract).
+        if (try_attach_gamescope0(params)) {
+          return true;
+        }
+
+        // 2) Ask the host idle unit to start (if present) before we spawn our own.
+        if (try_start_idle_unit_and_attach(params)) {
           return true;
         }
 
@@ -100,8 +99,15 @@ namespace stream_runtime {
           return false;
         }
 
-        // Clear stale sockets so we bind gamescope-0, not gamescope-1.
-        cleanup_stale_sockets();
+        // 3) Spawn owned headless gamescope — only if gamescope-0 is still free.
+        // Never attach/spawn onto gamescope-1 (portal is hard-wired to gamescope-0).
+        if (socket_exists("gamescope-0")) {
+          return try_attach_gamescope0(params);
+        }
+        if (socket_exists("gamescope-1") && !socket_exists("gamescope-0")) {
+          BOOST_LOG(warning) << "gamescope_runtime: stale gamescope-1 present without gamescope-0; cleaning and spawning owned gamescope-0"sv;
+          cleanup_stale_sockets_aggressive();
+        }
 
         const auto width = std::max(params.width, 640);
         const auto height = std::max(params.height, 480);
@@ -150,9 +156,7 @@ namespace stream_runtime {
           return false;
         }
         if (child == 0) {
-          // New session so stop() can signal the whole group.
           setsid();
-          // Prefer clean env for headless nest (no host Wayland).
           unsetenv("WAYLAND_DISPLAY");
           unsetenv("ENABLE_GAMESCOPE_WSI");
           unsetenv("ENABLE_HDR_WSI");
@@ -164,16 +168,16 @@ namespace stream_runtime {
         owned_ = true;
         socket_name_ = "gamescope-0";
 
-        // Wait for socket.
         for (int i = 0; i < 50; ++i) {
           if (socket_exists("gamescope-0")) {
+            socket_name_ = "gamescope-0";
             break;
           }
-          if (socket_exists("gamescope-1")) {
-            // Prefer not to use gamescope-1 for portal; try again / fail soft.
-            socket_name_ = "gamescope-1";
-            BOOST_LOG(warning) << "gamescope_runtime: bound gamescope-1 (portal may still expect gamescope-0)"sv;
-            break;
+          // If we got gamescope-1, fail — portal cannot use it reliably.
+          if (socket_exists("gamescope-1") && !socket_exists("gamescope-0")) {
+            BOOST_LOG(error) << "gamescope_runtime: owned spawn bound gamescope-1; aborting (portal requires gamescope-0)"sv;
+            stop_unlocked();
+            return false;
           }
           int status = 0;
           if (waitpid(pid_, &status, WNOHANG) == pid_) {
@@ -185,8 +189,8 @@ namespace stream_runtime {
           std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
-        if (!socket_exists(socket_name_)) {
-          BOOST_LOG(error) << "gamescope_runtime: Wayland socket never appeared"sv;
+        if (!socket_exists("gamescope-0")) {
+          BOOST_LOG(error) << "gamescope_runtime: gamescope-0 never appeared"sv;
           stop_unlocked();
           return false;
         }
@@ -195,7 +199,7 @@ namespace stream_runtime {
         refresh_runtime_state(params);
         write_env_file();
         BOOST_LOG(info) << "gamescope_runtime: started owned gamescope pid="sv << pid_
-                        << " socket="sv << socket_name_ << " "sv << width << "x"sv << height
+                        << " socket=gamescope-0 "sv << width << "x"sv << height
                         << "@"sv << refresh;
         return true;
       }
@@ -347,18 +351,53 @@ namespace stream_runtime {
         return out;
       }
 
-      static void cleanup_stale_sockets() {
-        const auto rt = xdg_runtime_dir();
-        for (const char *name : {"gamescope-0", "gamescope-1"}) {
-          const auto path = rt + "/" + name;
-          // Only remove if no process likely owns it — best-effort unlink of orphans.
-          if (fs::exists(path)) {
-            // Leave existing live idle; only clean if we are about to spawn and
-            // no process has the socket (connect would fail later). Skip aggressive kill
-            // of foreign gamescope here — attach path handles live sockets.
+      bool try_attach_gamescope0(const start_params_t &params) {
+        if (!socket_exists("gamescope-0")) {
+          return false;
+        }
+        owned_ = false;
+        socket_name_ = "gamescope-0";
+        x11_display_ = detect_x11_display();
+        pid_ = 0;
+        refresh_runtime_state(params);
+        write_env_file();
+        BOOST_LOG(info) << "gamescope_runtime: attached to existing gamescope-0 (idle/unit preferred)"sv;
+        return true;
+      }
+
+      bool try_start_idle_unit_and_attach(const start_params_t &params) {
+        // Best-effort: host may ship polaris-hdr-idle.service that owns gamescope-0.
+        if (std::system("systemctl --user is-active --quiet polaris-hdr-idle.service 2>/dev/null") == 0) {
+          // Active but socket missing — wait briefly.
+          for (int i = 0; i < 30 && !socket_exists("gamescope-0"); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
           }
-          std::error_code ec;
-          fs::remove(path + ".lock", ec);
+          return try_attach_gamescope0(params);
+        }
+        // Try start (no-op if unit does not exist).
+        if (std::system("systemctl --user start polaris-hdr-idle.service 2>/dev/null") == 0) {
+          for (int i = 0; i < 50 && !socket_exists("gamescope-0"); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          }
+          if (try_attach_gamescope0(params)) {
+            BOOST_LOG(info) << "gamescope_runtime: started polaris-hdr-idle and attached to gamescope-0"sv;
+            return true;
+          }
+        }
+        return false;
+      }
+
+      static void cleanup_stale_sockets_aggressive() {
+        // Only used when we are about to spawn and gamescope-0 is free but -1 is leftover.
+        std::system("pkill -u \"$(id -u)\" -f 'gamescope .*--backend headless' 2>/dev/null || true");
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        const auto rt = xdg_runtime_dir();
+        std::error_code ec;
+        for (const char *name : {
+               "gamescope-0", "gamescope-0.lock", "gamescope-0-ei", "gamescope-0-ei.lock",
+               "gamescope-1", "gamescope-1.lock", "gamescope-1-ei", "gamescope-1-ei.lock"
+             }) {
+          fs::remove(rt + "/" + name, ec);
         }
       }
 
