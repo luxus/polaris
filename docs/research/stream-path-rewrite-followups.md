@@ -1,8 +1,21 @@
 # Stream-path rewrite — follow-ups & live bugs
 
-**Branch:** `feat/linux-stream-runtime`  
+**Branch:** `feat/linux-stream-runtime` (tip `439b403`, deployed lea 2026-07-28)  
 **Last updated:** 2026-07-28  
 **Host under test:** lea (NVIDIA + KDE + private gamescope portal stack)
+
+### Progress snapshot (solid-base kickoff)
+
+| SB | Status | Notes |
+|----|--------|--------|
+| #1 Preview | **In progress** | Code uses `gamescopectl screenshot` (grim unsupported). Idle headless still fails to write PNG (vulkan screenshot texture). Needs PipeWire one-shot or last-stream-frame cache. |
+| #2 Clean stop / RST | Open | Code path not fully verified post-deploy; use browser stream + client End |
+| #3 WebUI disconnect | **Code landed** | Force `request_session_shutdown` + terminate; needs smoke with password |
+| #4 Cancel 470 | **Code landed** | Live RTSP controller can stop if owner uuid drifted; unit test added |
+| #5 Mode-agnostic apps | **Inject mode-aware** | luxusAi: wire library games only for gamescope_stream / portal-without-cage; else unwrap to steam-appid |
+| #6 Smoke harness | **Script landed** | `scripts/solid-base-smoke.sh` — browser stream preferred; needs `POLARIS_PASSWORD` |
+
+**Test preference (approved):** Browser Stream API for agent smoke.
 
 Working memory for the Linux stream-path rewrite. Do not drop these when context compresses — re-read before claiming “done”.
 
