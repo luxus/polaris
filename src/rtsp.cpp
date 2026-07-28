@@ -1573,35 +1573,17 @@ namespace rtsp_stream {
       config.monitor.bitrate = configuredBitrateKbps;
     }
 
+    // IMPORTANT: do NOT call video::active_encoder_runtime_supports_config() here.
+    // That path opens a full capture display + validate_config on the RTSP thread
+    // (reset_display → portal ScreenCast). Under gamescope_stream that blocks
+    // ANNOUNCE for tens of seconds, Moonlight times out with "no handshake",
+    // and UDP video/control never bind. Codec mode gates below are enough for
+    // reject; live capture will fail closed later if the runtime cannot encode.
     if (config.monitor.videoFormat != 0) {
-      const auto codec_name_for_format = [](int video_format) -> std::string_view {
-        switch (video_format) {
-          case 1:
-            return "hevc"sv;
-          case 2:
-            return "av1"sv;
-          default:
-            return "h264"sv;
-        }
-      };
-
-      if (!video::active_encoder_runtime_supports_config(config.monitor)) {
-        auto fallback_config = config.monitor;
-        fallback_config.videoFormat = 0;
-
-        if (video::active_encoder_runtime_supports_config(fallback_config)) {
-          BOOST_LOG(warning)
-            << "Session codec fallback: requested "sv << codec_name_for_format(config.monitor.videoFormat)
-            << " is not operational on encoder ["sv << video::active_encoder_name()
-            << "] for the current runtime; falling back to h264"sv;
-          config.monitor.videoFormat = 0;
-        } else {
-          BOOST_LOG(warning)
-            << "Session codec fallback: requested "sv << codec_name_for_format(config.monitor.videoFormat)
-            << " is not operational on encoder ["sv << video::active_encoder_name()
-            << "], but h264 validation also failed; keeping requested codec"sv;
-        }
-      }
+      BOOST_LOG(debug)
+        << "RTSP ANNOUNCE: accepting client codec format="sv << config.monitor.videoFormat
+        << " without runtime display reprob (encoder="sv << video::active_encoder_name()
+        << ")"sv;
     }
 
     if (config.monitor.videoFormat == 1 && video::active_hevc_mode == 1) {
