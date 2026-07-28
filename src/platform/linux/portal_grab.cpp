@@ -1421,6 +1421,8 @@ namespace portal {
     int cfg_height = 0;
     platf::mem_type_e mem_type = platf::mem_type_e::system;
     bool pipewire_dmabuf_negotiated = false;
+    // SPA_VIDEO_FORMAT_* from PipeWire negotiate; 0 = unknown / not yet negotiated.
+    std::uint32_t capture_spa_format = 0;
 
     bool probe_only = false;  // true during encoder probe (skip portal session)
 
@@ -1454,6 +1456,7 @@ namespace portal {
 
           const auto info = cap->frame_info();
           pipewire_dmabuf_negotiated = cap->negotiated_dmabuf();
+          capture_spa_format = info.spa_format;
           if (cap->negotiated() && info.width > 0 && info.height > 0) {
             cfg_width = info.width;
             cfg_height = info.height;
@@ -1504,12 +1507,31 @@ namespace portal {
       return line == "1" || line == "true";
     }
 
+    // True only when client wants HDR *and* capture is (or may still become) 10-bit.
+    // Negotiated BGRx/8-bit + HDR PQ signaling is the washed-red path.
+    bool capture_is_10bit_hdr() const {
+      // SPA_VIDEO_FORMAT_xBGR_210LE — value is stable in spa/param/video/raw.h
+      return capture_spa_format == SPA_VIDEO_FORMAT_xBGR_210LE;
+    }
+
     bool is_hdr() override {
-      return portal_force_hdr_enabled();
+      if (!portal_force_hdr_enabled()) {
+        return false;
+      }
+      // Before negotiate, allow HDR so probe can select 10-bit codecs.
+      if (capture_spa_format == 0) {
+        return true;
+      }
+      if (!capture_is_10bit_hdr()) {
+        BOOST_LOG(warning) << "portal: is_hdr=false — negotiated spa_format="sv << capture_spa_format
+                           << " is not xBGR_210LE (8-bit BGRx + PQ would wash colors)"sv;
+        return false;
+      }
+      return true;
     }
 
     bool get_hdr_metadata(SS_HDR_METADATA &metadata) override {
-      if (!portal_force_hdr_enabled()) {
+      if (!is_hdr()) {
         return false;
       }
       std::memset(&metadata, 0, sizeof(metadata));
@@ -1578,6 +1600,7 @@ namespace portal {
 
       auto frame_info = cap->frame_info();
       pipewire_dmabuf_negotiated = cap->negotiated_dmabuf();
+      capture_spa_format = frame_info.spa_format;
       if (cap->negotiated() && frame_info.width > 0 && frame_info.height > 0) {
         cfg_width = frame_info.width;
         cfg_height = frame_info.height;
@@ -1712,7 +1735,16 @@ namespace portal {
 #ifdef POLARIS_BUILD_CUDA
       if (mem_type == platf::mem_type_e::cuda) {
         if (pipewire_dmabuf_negotiated) {
-          return cuda::make_avcodec_dmabuf_encode_device(w, h);
+          auto device = cuda::make_avcodec_dmabuf_encode_device(w, h);
+          // DMA-BUF BGRx is still 8-bit; only xBGR_210LE can feed real P010 HDR.
+          // Without prefer_8bit, make_encode_device keeps Rec.2020+PQ on 8-bit pixels
+          // → washed reds / crushed shadows.
+          if (device && !capture_is_10bit_hdr()) {
+            device->prefer_8bit_encode = true;
+            BOOST_LOG(info) << "portal: dmabuf capture is 8-bit (spa="sv << capture_spa_format
+                            << "); prefer_8bit_encode to avoid PQ-on-BGRx washout"sv;
+          }
+          return device;
         }
         // Portal MemFd/SHM: RAM→CUDA NV12. prefer_8bit avoids software P010 for 10-bit clients.
         auto device = cuda::make_avcodec_encode_device(w, h, false);

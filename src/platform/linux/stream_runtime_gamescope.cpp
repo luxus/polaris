@@ -22,6 +22,8 @@
   #include <mutex>
   #include <signal.h>
   #include <string>
+  #include <string_view>
+  #include <cstdio>
   #include <sys/stat.h>
   #include <sys/types.h>
   #include <sys/wait.h>
@@ -369,22 +371,65 @@ namespace stream_runtime {
         return true;
       }
 
+      // polaris-hdr-idle reads $XDG_RUNTIME_DIR/polaris-hdr-force at start for --hdr-enabled.
+      // process.cpp writes the file but does not restart the unit — so an idle started in
+      // SDR stays SDR while portal claims HDR (BGRx + PQ washout). Restart when needed.
+      static bool idle_hdr_flags_match_force() {
+        const char *rt = std::getenv("XDG_RUNTIME_DIR");
+        bool want_hdr = false;
+        if (rt && *rt) {
+          std::ifstream f(std::string(rt) + "/polaris-hdr-force");
+          std::string line;
+          if (f && std::getline(f, line)) {
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r' || line.back() == ' ')) {
+              line.pop_back();
+            }
+            want_hdr = (line == "1" || line == "true");
+          }
+        }
+        // Inspect running headless gamescope cmdline for --hdr-enabled.
+        FILE *pipe = popen(
+          "pgrep -a -u \"$(id -u)\" -f 'gamescope .*--backend headless' 2>/dev/null | head -1",
+          "r");
+        if (!pipe) {
+          return !want_hdr;
+        }
+        char buf[1024] {};
+        const bool got = fgets(buf, sizeof(buf), pipe) != nullptr;
+        pclose(pipe);
+        if (!got) {
+          return !want_hdr;
+        }
+        const bool running_hdr = std::string_view(buf).find("--hdr-enabled") != std::string_view::npos;
+        return running_hdr == want_hdr;
+      }
+
+      static bool restart_or_start_idle_unit() {
+        const int rc = std::system(
+          "systemctl --user restart polaris-hdr-idle.service 2>/dev/null || "
+          "systemctl --user start polaris-hdr-idle.service 2>/dev/null");
+        return rc == 0;
+      }
+
       bool try_start_idle_unit_and_attach(const start_params_t &params) {
         // Best-effort: host may ship polaris-hdr-idle.service that owns gamescope-0.
-        if (std::system("systemctl --user is-active --quiet polaris-hdr-idle.service 2>/dev/null") == 0) {
-          // Active but socket missing — wait briefly.
+        const bool active =
+          std::system("systemctl --user is-active --quiet polaris-hdr-idle.service 2>/dev/null") == 0;
+        if (active && idle_hdr_flags_match_force()) {
           for (int i = 0; i < 30 && !socket_exists("gamescope-0"); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
           }
           return try_attach_gamescope0(params);
         }
-        // Try start (no-op if unit does not exist).
-        if (std::system("systemctl --user start polaris-hdr-idle.service 2>/dev/null") == 0) {
-          for (int i = 0; i < 50 && !socket_exists("gamescope-0"); ++i) {
+        if (active && !idle_hdr_flags_match_force()) {
+          BOOST_LOG(info) << "gamescope_runtime: restarting polaris-hdr-idle to match polaris-hdr-force"sv;
+        }
+        if (restart_or_start_idle_unit()) {
+          for (int i = 0; i < 80 && !socket_exists("gamescope-0"); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
           }
           if (try_attach_gamescope0(params)) {
-            BOOST_LOG(info) << "gamescope_runtime: started polaris-hdr-idle and attached to gamescope-0"sv;
+            BOOST_LOG(info) << "gamescope_runtime: polaris-hdr-idle ready (HDR flags synced); attached to gamescope-0"sv;
             return true;
           }
         }
