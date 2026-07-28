@@ -70,11 +70,11 @@ const streamDisplayModes = [
   {
     id: 'gamescope_stream',
     title: 'Gamescope Stream',
-    badge: 'Coming soon',
-    available: false,
+    badge: 'gamescope',
+    available: true,
     group: 'private',
-    copy: 'Owned Gamescope session with portal/PipeWire capture. Not selectable until the gamescope runtime lands.',
-    note: 'Until then: use Mirror Desktop with external gamescope + portal (lea host path).',
+    copy: 'Attach to idle gamescope-0 or spawn an owned headless Gamescope. Portal/PipeWire captures the session.',
+    note: 'Runtime: gamescope · Capture: portal · Needs gamescope on PATH. Prefer idle unit attach on lea.',
   },
   {
     id: 'family_isolated',
@@ -286,6 +286,15 @@ function setStreamDisplayMode(mode) {
   if (next.linux_private_runtime) {
     config.value.linux_private_runtime = next.linux_private_runtime
   }
+  if (next.linux_auto_manage_displays) {
+    config.value.linux_auto_manage_displays = next.linux_auto_manage_displays
+  }
+  if (next.headless_swap_mode) {
+    config.value.headless_swap_mode = next.headless_swap_mode
+  }
+  if (next.capture) {
+    config.value.capture = next.capture
+  }
 }
 
 function applyDisplayPlan(choice) {
@@ -368,6 +377,56 @@ const validateFallbackMode = (event) => {
             data-stream-display-runtime-notice
           >
             {{ streamDisplayRuntimeNotice.copy }}
+          </div>
+
+          <div
+            v-if="streamDisplayMode === 'headless_dongle'"
+            class="settings-subtle-surface space-y-3"
+            data-dongle-outputs
+          >
+            <div class="section-kicker">Dongle outputs</div>
+            <p class="text-sm text-storm">
+              Set the dummy-plug connector and your real panel. Save config after editing.
+              Names must match <code class="text-ice">kscreen-doctor -o</code> (e.g. HDMI-A-1, DP-3).
+            </p>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <label class="block text-sm text-storm">
+                Streaming output (dongle)
+                <input
+                  v-model="config.linux_streaming_output"
+                  type="text"
+                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                  placeholder="HDMI-A-1"
+                />
+              </label>
+              <label class="block text-sm text-storm">
+                Primary output (real panel)
+                <input
+                  v-model="config.linux_primary_output"
+                  type="text"
+                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                  placeholder="DP-3"
+                />
+              </label>
+              <label class="block text-sm text-storm sm:col-span-2">
+                Swap mode
+                <select
+                  v-model="config.headless_swap_mode"
+                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                >
+                  <option value="privacy">privacy — dongle primary, blank panel</option>
+                  <option value="off">off — extended, panel stays primary</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div
+            v-if="streamDisplayMode === 'gamescope_stream'"
+            class="rounded-lg border border-ice/20 bg-ice/5 px-3 py-2 text-sm text-storm"
+          >
+            Gamescope Stream attaches to <code class="text-ice">gamescope-0</code> when the idle unit is running,
+            or spawns an owned headless Gamescope. Capture stays portal/PipeWire. Save and restart Polaris after switching.
           </div>
 
           <div class="settings-subtle-surface" data-linux-streaming-setup>

@@ -119,21 +119,17 @@ TEST(StreamDisplayPolicyTests, ApplySelectionSyncsModeAndLegacyBooleans) {
   EXPECT_FALSE(config::video.linux_display.use_cage_compositor);
 }
 
-TEST(StreamDisplayPolicyTests, GamescopeStreamIsRegisteredButUnavailable) {
-  LinuxDisplayPolicyGuard guard;
-  std::string error;
-
-  EXPECT_FALSE(stream_display_policy::selection_available("gamescope_stream"));
-  EXPECT_FALSE(stream_display_policy::apply_selection("gamescope_stream", error));
-  EXPECT_NE(error.find("not available"), std::string::npos);
-
+TEST(StreamDisplayPolicyTests, GamescopeStreamRegisteredWithGamescopeRuntime) {
   const auto options = stream_display_policy::mode_options(false);
   const auto gamescope = std::find_if(options.begin(), options.end(), [](const auto &opt) {
     return opt.value == "gamescope_stream";
   });
   ASSERT_NE(gamescope, options.end());
-  EXPECT_FALSE(gamescope->available);
-  EXPECT_FALSE(gamescope->unavailable_reason.empty());
+  EXPECT_EQ(gamescope->runtime, "gamescope");
+  EXPECT_EQ(gamescope->capture, "portal");
+  // Availability depends on PATH; either way apply must not crash.
+  std::string error;
+  stream_display_policy::apply_selection("gamescope_stream", error);
 }
 
 TEST(StreamDisplayPolicyTests, ExplicitStreamModeWinsOverBooleans) {
@@ -167,7 +163,7 @@ TEST(StreamDisplayPolicyTests, AllowedLaunchModesExcludeUnavailableByDefault) {
   const auto allowed = stream_display_policy::allowed_launch_modes(true, false);
   EXPECT_NE(std::find(allowed.begin(), allowed.end(), "headless_stream"), allowed.end());
   EXPECT_NE(std::find(allowed.begin(), allowed.end(), "host_virtual_display"), allowed.end());
-  EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "gamescope_stream"), allowed.end());
+  // gamescope_stream is available when gamescope is on PATH (may or may not be listed).
   EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "family_isolated"), allowed.end());
   EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "headless_evdi"), allowed.end());
 }
@@ -180,7 +176,6 @@ TEST(StreamDisplayPolicyTests, ModeOptionsExposeRuntimeCaptureTopologyForPlugins
   ASSERT_NE(gamescope, options.end());
   EXPECT_EQ(gamescope->runtime, "gamescope");
   EXPECT_EQ(gamescope->capture, "portal");
-  EXPECT_FALSE(gamescope->available);
 
   const auto headless = std::find_if(options.begin(), options.end(), [](const auto &opt) {
     return opt.value == "headless_stream";

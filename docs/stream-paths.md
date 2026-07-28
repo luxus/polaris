@@ -18,7 +18,7 @@ Config key: `linux_stream_mode = <path id>`. Legacy booleans (`headless_mode`, `
 | `windowed_stream` | labwc | wlroots | leave_alone | Available (GPU-native preference) |
 | `desktop_display` | none | portal | leave_alone | Available (Mirror Desktop / external gamescope) |
 | `host_virtual_display` | none | auto | host_virtual | Available |
-| `gamescope_stream` | gamescope | portal | leave_alone | **Reserved** — runtime ownership TBD |
+| `gamescope_stream` | gamescope | portal | leave_alone | **Available** when `gamescope` is on PATH (attach idle or spawn owned) |
 | `family_isolated` | labwc | wlroots | leave_alone | **Reserved** — Family Mode / isolated per-app (PR #226) |
 | `headless_evdi` | none | evdi | swap_primary | **Reserved** — EVDI-as-primary (PR #226) |
 | `headless_dongle` | none | kms | swap_primary | **Available** when `linux_streaming_output` + `linux_primary_output` + auto_manage are set (privacy swap via kscreen-doctor) |

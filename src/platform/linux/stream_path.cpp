@@ -117,15 +117,15 @@ namespace stream_path {
       {
         k_gamescope_stream,
         "Gamescope Stream",
-        "Coming soon",
-        "Private Gamescope session with portal/PipeWire capture. Lifecycle ownership lands in a follow-up.",
+        "gamescope",
+        "Private Gamescope session (attach to idle gamescope-0 or spawn owned headless). Capture via portal/PipeWire.",
         runtime_kind_e::GAMESCOPE,
         capture_kind_e::PORTAL,
         topology_kind_e::LEAVE_ALONE,
         false,
         true,
-        false,
-        "Gamescope Stream is not available in this build; use Mirror Desktop with an external gamescope session, or Private Stream (labwc).",
+        true,  // available when gamescope is on PATH (checked at resolve/apply)
+        {},
         "private",
       },
       {
@@ -369,9 +369,14 @@ namespace stream_path {
         }
         break;
       case runtime_kind_e::GAMESCOPE:
-        out.use_private_runtime = false;  // not owned until backend lands
-        out.use_cage_runtime = false;
+        out.use_private_runtime = path.available && caps.gamescope_present;
+        out.use_cage_runtime = false;  // not labwc
         out.effective_headless = path.request_headless;
+        if (!caps.gamescope_present) {
+          out.available = false;
+          out.unavailable_reason = "gamescope binary not found on PATH";
+          out.use_private_runtime = false;
+        }
         break;
       case runtime_kind_e::NONE:
         out.use_private_runtime = false;

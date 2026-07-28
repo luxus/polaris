@@ -361,6 +361,90 @@ namespace confighttp {
       return cmd.str();
     }
 
+    /**
+     * @brief Try preview capture for the active stream path (labwc / gamescope / host).
+     * @return true on success. Uses grim on Wayland sockets first; spectacle last.
+     */
+    bool try_stream_path_preview_capture(const std::string &requested_output,
+                                         const std::string &outfile,
+                                         std::string &used_backend) {
+      const auto xdg = preview_xdg_runtime_dir();
+      auto try_grim_socket = [&](const std::string &socket_name, const std::string &output_name) {
+        if (socket_name.empty()) {
+          return false;
+        }
+        const auto sock_path = xdg + "/" + socket_name;
+        if (access(sock_path.c_str(), F_OK) != 0) {
+          return false;
+        }
+        const auto cmd = build_cage_preview_capture_command(socket_name, output_name, outfile);
+        return std::system(cmd.c_str()) == 0;
+      };
+
+      // 1) Owned labwc private runtime
+      if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running()) {
+        const auto socket = cage_display_router::get_wayland_socket();
+        const auto output = active_preview_output_name(requested_output);
+        if (try_grim_socket(socket, output)) {
+          used_backend = "labwc";
+          return true;
+        }
+      }
+
+      // 2) Gamescope (owned or idle attach) — portal streams this socket
+      for (const char *gs : {"gamescope-0", "gamescope-1"}) {
+        if (try_grim_socket(gs, "")) {
+          used_backend = gs;
+          return true;
+        }
+      }
+      if (const char *gs_env = std::getenv("GAMESCOPE_WAYLAND_DISPLAY"); gs_env && *gs_env) {
+        if (try_grim_socket(gs_env, "")) {
+          used_backend = gs_env;
+          return true;
+        }
+      }
+
+      // 3) Host Wayland (Mirror Desktop / dongle desktop)
+      if (const char *wl = std::getenv("WAYLAND_DISPLAY"); wl && *wl) {
+        std::string out_name = requested_output;
+        if (out_name.empty() && !config::video.linux_display.streaming_output.empty() &&
+            config::video.linux_display.stream_mode == "headless_dongle") {
+          out_name = config::video.linux_display.streaming_output;
+        }
+        if (try_grim_socket(wl, out_name)) {
+          used_backend = std::string("host:") + wl;
+          return true;
+        }
+        // grim without -o
+        if (try_grim_socket(wl, "")) {
+          used_backend = std::string("host:") + wl;
+          return true;
+        }
+      }
+
+      // 4) Host X11 / spectacle last resort
+      {
+        const std::string cmd = "spectacle -b -n -o " + shell_escape(outfile) + " 2>/dev/null";
+        if (std::system(cmd.c_str()) == 0) {
+          used_backend = "spectacle";
+          return true;
+        }
+      }
+
+      // 5) grim on default session without explicit socket (some hosts)
+      {
+        const std::string cmd = "grim " + shell_escape(outfile) + " 2>/dev/null";
+        if (std::system(cmd.c_str()) == 0) {
+          used_backend = "grim";
+          return true;
+        }
+      }
+
+      used_backend = "none";
+      return false;
+    }
+
     std::string preview_failure_log_key(const std::string &capture_kind,
                                         const std::string &socket_name,
                                         const std::string &output_name) {
@@ -4036,36 +4120,17 @@ namespace confighttp {
       requested_output = it->second;
     }
 
-    // Prefer grim on labwc's socket (works in both headless and windowed mode)
-    bool captured = false;
-    bool cage_capture_required = false;
-    if (config::video.linux_display.use_cage_compositor) {
-      auto cage_socket = cage_display_router::get_wayland_socket();
-      if (!cage_socket.empty() && cage_display_router::is_running()) {
-        const auto preview_output = active_preview_output_name(requested_output);
-        const auto cmd = build_cage_preview_capture_command(cage_socket, preview_output, tmpfile);
-        cage_capture_required = true;
-        if (std::system(cmd.c_str()) == 0) {
-          captured = true;
-          clear_cage_preview_capture_failure("screenshot", cage_socket, preview_output);
-        } else {
-          log_cage_preview_capture_failure("screenshot", cage_socket, preview_output);
-        }
-      }
-    }
-
-    // Fallback: spectacle on desktop (for non-cage setups)
-    if (!captured && !cage_capture_required) {
-      std::string cmd = "spectacle -b -n -o " + tmpfile + " 2>/dev/null";
-      captured = (std::system(cmd.c_str()) == 0);
+    std::string preview_backend;
+    const bool captured = try_stream_path_preview_capture(requested_output, tmpfile, preview_backend);
+    if (captured) {
+      BOOST_LOG(debug) << "display_preview: captured via "sv << preview_backend;
     }
 
     if (!captured) {
       nlohmann::json err;
       err["status"] = false;
-      err["error"] = cage_capture_required ?
-        "Preview capture failed; the active stream may still be healthy" :
-        "Screenshot capture failed";
+      err["error"] = "Screenshot capture failed for the active stream path (tried labwc, gamescope, host Wayland, spectacle/grim)";
+      err["preview_backend"] = preview_backend;
       send_response(response, err);
       return;
     }
@@ -4138,35 +4203,8 @@ namespace confighttp {
       while (!shutdown_event->peek()) {
         auto start = std::chrono::steady_clock::now();
 
-        // Capture frame
-        bool captured = false;
-        bool cage_capture_required = false;
-        if (config::video.linux_display.use_cage_compositor) {
-          auto cage_socket = cage_display_router::get_wayland_socket();
-          if (!cage_socket.empty() && cage_display_router::is_running()) {
-            const auto preview_output = active_preview_output_name(requested_output);
-            const auto cmd = build_cage_preview_capture_command(cage_socket, preview_output, tmpfile);
-            cage_capture_required = true;
-            if (std::system(cmd.c_str()) == 0) {
-              captured = true;
-              clear_cage_preview_capture_failure("MJPEG frame", cage_socket, preview_output);
-            } else {
-              log_cage_preview_capture_failure("MJPEG frame", cage_socket, preview_output);
-              break;
-            }
-          }
-        }
-
-        if (!captured && !cage_capture_required) {
-          std::string cmd = "spectacle -b -n -o " + tmpfile + " 2>/dev/null";
-          if (std::system(cmd.c_str()) == 0) {
-            captured = true;
-          } else {
-            cmd = "grim " + shell_escape(tmpfile) + " 2>/dev/null";
-            captured = (std::system(cmd.c_str()) == 0);
-          }
-        }
-
+        std::string preview_backend;
+        const bool captured = try_stream_path_preview_capture(requested_output, tmpfile, preview_backend);
         if (!captured) {
           break;
         }

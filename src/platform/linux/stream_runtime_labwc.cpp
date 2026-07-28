@@ -75,14 +75,16 @@ namespace stream_runtime {
 
   }  // namespace
 
+  // Provided by stream_runtime_gamescope.cpp
+  std::shared_ptr<stream_runtime_t> gamescope_runtime_instance();
+
   std::shared_ptr<stream_runtime_t> acquire(stream_display_policy::private_runtime_e runtime) {
     using stream_display_policy::private_runtime_e;
     switch (runtime) {
       case private_runtime_e::LABWC:
         return g_labwc_runtime;
       case private_runtime_e::GAMESCOPE:
-        // Not implemented yet — follow-up PR owns gamescope lifecycle.
-        return nullptr;
+        return gamescope_runtime_instance();
       case private_runtime_e::NONE:
       default:
         return nullptr;
@@ -97,6 +99,9 @@ namespace stream_runtime {
       active_encoder_requires_gpu_native_capture,
       runtime_gpu_native_override_active
     );
+    if (resolved.private_runtime == private_runtime_e::GAMESCOPE) {
+      return acquire(private_runtime_e::GAMESCOPE);
+    }
     if (!resolved.use_private_runtime && !resolved.use_cage_runtime) {
       return nullptr;
     }

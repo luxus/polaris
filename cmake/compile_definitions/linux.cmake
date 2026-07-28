@@ -369,6 +369,7 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_display_policy.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime_labwc.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime_gamescope.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/glad/src/egl.c"
         "${CMAKE_SOURCE_DIR}/third-party/glad/src/gl.c"
         "${CMAKE_SOURCE_DIR}/third-party/glad/include/EGL/eglplatform.h"

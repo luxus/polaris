@@ -149,7 +149,13 @@ namespace stream_display_policy {
 
   bool selection_available(std::string_view selection) {
     if (const auto *path = stream_path::find(selection)) {
-      return path->available;
+      if (!path->available) {
+        return false;
+      }
+      if (path->id == stream_path::k_gamescope_stream) {
+        return stream_path::probe_host_capabilities().gamescope_present;
+      }
+      return true;
     }
     return false;
   }
@@ -340,6 +346,18 @@ namespace stream_display_policy {
     }
 
     auto &linux_display = config::video.linux_display;
+
+    if (key == stream_path::k_gamescope_stream) {
+      auto caps = stream_path::probe_host_capabilities();
+      if (!caps.gamescope_present) {
+        error = "gamescope_stream requires the gamescope binary on PATH";
+        return false;
+      }
+      // Prefer portal capture of gamescope; leave idle unit free to attach.
+      if (config::video.capture.empty()) {
+        config::video.capture = "portal";
+      }
+    }
 
     // Dongle path needs outputs configured before we commit.
     if (key == stream_path::k_headless_dongle) {

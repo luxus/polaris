@@ -43,8 +43,8 @@ export function resolveStreamDisplayMode(config = {}) {
 }
 
 export function streamDisplayModeAvailable(mode) {
-  // Gamescope ownership + Family/EVDI software paths still reserved.
-  if (mode === 'gamescope_stream' || mode === 'family_isolated' || mode === 'headless_evdi') return false
+  // Family/EVDI software paths still reserved; gamescope is selectable (attach or own).
+  if (mode === 'family_isolated' || mode === 'headless_evdi') return false
   return true
 }
 
@@ -71,18 +71,19 @@ export function applyStreamDisplayModeToConfig(config = {}, mode) {
       next.linux_prefer_gpu_native_capture = 'disabled'
       break
     case 'gamescope_stream':
-      // Not available yet — keep intentional values for future runtime without enabling labwc.
       next.headless_mode = 'enabled'
       next.linux_use_cage_compositor = 'disabled'
       next.linux_prefer_gpu_native_capture = 'disabled'
       next.linux_private_runtime = 'gamescope'
+      next.capture = next.capture || 'portal'
       break
     case 'headless_dongle':
       next.headless_mode = 'enabled'
       next.linux_use_cage_compositor = 'disabled'
       next.linux_prefer_gpu_native_capture = 'disabled'
       next.linux_auto_manage_displays = 'enabled'
-      next.headless_swap_mode = 'privacy'
+      next.headless_swap_mode = next.headless_swap_mode || 'privacy'
+      next.capture = 'kms'
       break
     case 'desktop_display':
     default:

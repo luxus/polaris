@@ -4129,12 +4129,17 @@ namespace proc {
     allow_client_commands = app.allow_client_commands;
 
 #ifdef __linux__
+    const bool mirror_desktop_session = launch_session && launch_session->mirror_desktop;
+    const bool gamescope_stream_session =
+      config::video.linux_display.stream_mode == "gamescope_stream" ||
+      config::video.linux_display.private_runtime == "gamescope";
+    // Private nested runtime: labwc cage and/or owned/attach gamescope.
     const bool use_cage_compositor_for_session =
-      config::video.linux_display.use_cage_compositor &&
-      !(launch_session && launch_session->mirror_desktop);
+      !mirror_desktop_session &&
+      (config::video.linux_display.use_cage_compositor || gamescope_stream_session);
     const bool requested_headless_for_session =
-      config::video.linux_display.headless_mode &&
-      !(launch_session && launch_session->mirror_desktop);
+      !mirror_desktop_session &&
+      (config::video.linux_display.headless_mode || gamescope_stream_session);
     const auto steam_guard_snapshot = snapshot_steam_big_picture_input_guard(
       use_cage_compositor_for_session,
       launch_session && launch_session->mirror_desktop
@@ -5071,6 +5076,7 @@ namespace proc {
       prefer_gpu_native_capture || encoder_requires_gpu_native_capture;
     const bool should_probe_windowed_cage_for_gpu_native =
       use_cage_compositor_for_session &&
+      !gamescope_stream_session &&
       cage_display_router::should_attempt_windowed_gpu_native_probe(
         requested_headless,
         prefer_gpu_native_capture,
@@ -5112,10 +5118,13 @@ namespace proc {
       encoder_requires_gpu_native_capture,
       false
     );
-    const auto private_runtime = use_cage_compositor_for_session ?
-      stream_runtime::acquire(path_policy.private_runtime == stream_display_policy::private_runtime_e::GAMESCOPE ?
+    const auto private_runtime_kind =
+      (path_policy.private_runtime == stream_display_policy::private_runtime_e::GAMESCOPE ||
+       gamescope_stream_session) ?
         stream_display_policy::private_runtime_e::GAMESCOPE :
-        stream_display_policy::private_runtime_e::LABWC) :
+        stream_display_policy::private_runtime_e::LABWC;
+    const auto private_runtime = use_cage_compositor_for_session ?
+      stream_runtime::acquire(private_runtime_kind) :
       nullptr;
     if (use_cage_compositor_for_session && !private_runtime) {
       BOOST_LOG(error) << "session_manager: Private stream runtime is not available for path ["sv
@@ -5503,27 +5512,43 @@ namespace proc {
     std::string working_dir_cmd = effective_cmd;
     auto launch_env = _env;
     bool app_command_uses_cage_runtime = false;
-    if (use_cage_compositor_for_session && cage_display_router::is_running() && !_app.cmd.empty()) {
-      effective_cmd = cage_runtime_command(_app.cmd);
+    if (use_cage_compositor_for_session && private_runtime && private_runtime->is_running() && !_app.cmd.empty()) {
+      // Prefer runtime wrap (labwc or gamescope); fall back to cage helper for labwc-only paths.
+      if (private_runtime->backend_id() == stream_display_policy::k_runtime_gamescope) {
+        effective_cmd = private_runtime->wrap_cmd(_app.cmd);
+      }
+      else {
+        effective_cmd = cage_runtime_command(_app.cmd);
+      }
       working_dir_cmd = effective_cmd;
       app_command_uses_cage_runtime = true;
       if (!allow_cage_mangohud) {
         strip_mangohud_env(launch_env);
       }
       apply_gamepad_sdl_env(launch_env);
-      auto cage_socket = cage_display_router::get_wayland_socket();
+      auto cage_socket = private_runtime->wayland_socket();
+      if (cage_socket.empty()) {
+        cage_socket = cage_display_router::get_wayland_socket();
+      }
       if (!cage_socket.empty()) {
         launch_env["WAYLAND_DISPLAY"] = cage_socket;
         launch_env["AT_SPI_BUS_ADDRESS"] = "";
-        auto cage_display = cage_display_router::get_x11_display();
+        if (private_runtime->backend_id() == stream_display_policy::k_runtime_gamescope) {
+          launch_env["GAMESCOPE_WAYLAND_DISPLAY"] = cage_socket;
+        }
+        auto cage_display = private_runtime->x11_display();
+        if (cage_display.empty()) {
+          cage_display = cage_display_router::get_x11_display();
+        }
         if (!cage_display.empty()) {
           launch_env["DISPLAY"] = cage_display;
-          BOOST_LOG(info) << "cage: Set WAYLAND_DISPLAY="sv << cage_socket
+          BOOST_LOG(info) << "private_runtime: Set WAYLAND_DISPLAY="sv << cage_socket
                           << " DISPLAY="sv << cage_display
+                          << " backend="sv << private_runtime->backend_id()
                           << " for app command"sv;
         } else {
           launch_env.erase("DISPLAY");
-          BOOST_LOG(info) << "cage: Set WAYLAND_DISPLAY="sv << cage_socket << " and cleared DISPLAY for app command"sv;
+          BOOST_LOG(info) << "private_runtime: Set WAYLAND_DISPLAY="sv << cage_socket << " and cleared DISPLAY for app command"sv;
         }
       }
     }

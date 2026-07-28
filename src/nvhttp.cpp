@@ -986,6 +986,14 @@ namespace nvhttp {
           values["output_name"] = config::video.output_name;
         }
       }
+      if (selection == "gamescope_stream") {
+        if (!config::video.capture.empty()) {
+          values["capture"] = config::video.capture;
+        }
+        else {
+          values["capture"] = "portal";
+        }
+      }
       if (!persist_config_values(values)) {
         error = "failed to persist stream display mode";
         return false;

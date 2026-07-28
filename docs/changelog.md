@@ -16,6 +16,9 @@ starts at `v1.0.0`.
 - Document the path plugin contract in `docs/stream-paths.md`.
 - Enable **Headless Dongle** path (`headless_dongle`): privacy/extended swap via kscreen-doctor (`display_topology`, `headless_swap_mode`).
 - Harden portal/PipeWire capture teardown (disconnect under loop lock) to avoid SEGV on service stop.
+- Enable **Gamescope Stream** ownership: attach to idle `gamescope-0` or spawn headless gamescope; wrap app launches into that runtime.
+- Dashboard preview tries labwc, gamescope-0/1, host Wayland (grim), then spectacle — works across stream paths.
+- Web UI: selectable path cards write full config (including dongle outputs and gamescope/portal capture).
 
 ## v1.3.1 - 2026-07-12
 
