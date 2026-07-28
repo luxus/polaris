@@ -4197,6 +4197,8 @@ namespace proc {
     const bool gamescope_stream_session =
       config::video.linux_display.stream_mode == "gamescope_stream" ||
       config::video.linux_display.private_runtime == "gamescope";
+    // Set true after enable_hdr when rewiring to polaris-hdr-session nested WSI.
+    bool nested_wsi_hdr_session = false;
     // Private nested runtime: labwc cage and/or owned/attach gamescope.
     const bool use_cage_compositor_for_session =
       !mirror_desktop_session &&
@@ -4468,6 +4470,67 @@ namespace proc {
                         << (launch_session->enable_hdr ? "1"sv : "0"sv)
                         << " from enable_hdr="sv
                         << (launch_session->enable_hdr ? "true"sv : "false"sv);
+      }
+    }
+
+    // Nested WSI is the proven game-HDR present path (FROG layer + DXVK HDR10
+    // swapchain). SB-5 unwrapped polaris-hdr-session into attach+X11, which
+    // cannot register Gamescope surfaces — BG3 etc. stay SDR despite stream PQ.
+    // For gamescope_stream + client HDR + Steam appid, rewire to nested session.
+    if (gamescope_stream_session && launch_session->enable_hdr) {
+      std::string appid = _app.steam_appid;
+      if (appid.empty()) {
+        if (const auto detected = extract_steam_appid_from_command(_app.cmd); detected) {
+          appid = *detected;
+        }
+      }
+      if (appid.empty()) {
+        for (const auto &cmd : _app.detached) {
+          if (const auto detected = extract_steam_appid_from_command(cmd); detected) {
+            appid = *detected;
+            break;
+          }
+        }
+      }
+      boost::filesystem::path session_bin;
+      try {
+        session_bin = boost::process::v1::search_path("polaris-hdr-session");
+      }
+      catch (...) {
+        session_bin.clear();
+      }
+      if (!appid.empty() && !session_bin.empty()) {
+        nested_wsi_hdr_session = true;
+        _app.steam_appid = appid;
+        const auto start_cmd = session_bin.string() + " start " + appid;
+        const auto wait_cmd = session_bin.string() + " wait";
+        const auto stop_cmd = session_bin.string() + " stop";
+        // Drop attach-era steam launches; nested session owns Steam as gamescope child.
+        _app.detached.clear();
+        _app.cmd = wait_cmd;
+        _app.auto_detach = false;
+        _app.wait_all = true;
+        // Keep non-session prep (e.g. steam -shutdown undo); replace session entries.
+        std::vector<proc::cmd_t> kept_prep;
+        kept_prep.reserve(_app.prep_cmds.size() + 1);
+        for (auto &cmd : _app.prep_cmds) {
+          if (command_uses_polaris_hdr_session(cmd.do_cmd) ||
+              command_uses_polaris_hdr_session(cmd.undo_cmd)) {
+            continue;
+          }
+          kept_prep.push_back(std::move(cmd));
+        }
+        kept_prep.insert(
+          kept_prep.begin(),
+          proc::cmd_t {std::string {start_cmd}, std::string {stop_cmd}, false}
+        );
+        _app.prep_cmds = std::move(kept_prep);
+        BOOST_LOG(info) << "session_manager: nested WSI HDR path — polaris-hdr-session start "
+                        << appid << " (Steam primary child; not attach/X11)"sv;
+      }
+      else if (launch_session->enable_hdr) {
+        BOOST_LOG(warning) << "session_manager: HDR client but cannot nest WSI "
+                              "(need steam-appid + polaris-hdr-session on PATH); using attach"sv;
       }
     }
 #endif
@@ -5212,10 +5275,14 @@ namespace proc {
        gamescope_stream_session) ?
         stream_display_policy::private_runtime_e::GAMESCOPE :
         stream_display_policy::private_runtime_e::LABWC;
-    const auto private_runtime = use_cage_compositor_for_session ?
+    // Nested WSI owns gamescope-0 (Steam as primary child). Do not attach/spawn a
+    // second idle compositor — that was the SB-5 path that lost FROG HDR present.
+    const bool need_private_runtime =
+      use_cage_compositor_for_session && !nested_wsi_hdr_session;
+    const auto private_runtime = need_private_runtime ?
       stream_runtime::acquire(private_runtime_kind) :
       nullptr;
-    if (use_cage_compositor_for_session && !private_runtime) {
+    if (need_private_runtime && !private_runtime) {
       BOOST_LOG(error) << "session_manager: Private stream runtime is not available for path ["sv
                        << path_policy.selection << "] backend=["sv << path_policy.backend_name << ']';
       return 503;
@@ -5651,13 +5718,20 @@ namespace proc {
           }
         }
       }
-    } else if (use_cage_compositor_for_session) {
+    } else if (use_cage_compositor_for_session && !nested_wsi_hdr_session) {
       // No detached commands — start cage empty, game will use _app.cmd
       if (!start_cage_with_runtime_fallback("")) {
         BOOST_LOG(error) << "session_manager: Failed to start cage compositor"sv;
         return 503;
       }
       _session_used_cage_compositor = true;
+    } else if (nested_wsi_hdr_session) {
+      // polaris-hdr-session start already owns nested gamescope + Steam (prep-cmd).
+      // _app.cmd is "wait"; do not attach idle or spawn a second compositor.
+      _session_used_cage_compositor = false;
+      confighttp::set_session_state(confighttp::session_state_e::game_launching);
+      confighttp::emit_session_event("game_launching", "Launching " + _app.name + " (nested WSI)");
+      BOOST_LOG(info) << "session_manager: nested WSI session ready (gamescope owned by polaris-hdr-session)"sv;
     } else
 #endif
     {
