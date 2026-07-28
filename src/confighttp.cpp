@@ -415,7 +415,7 @@ namespace confighttp {
         std::ostringstream cmd;
         cmd << env << "gamescopectl screenshot " << shell_escape(outfile)
             << " >/dev/null 2>&1";
-        if (std::system(cmd.c_str()) != 0) {
+        if (std::system(cmd.str().c_str()) != 0) {
           return false;
         }
         // Screenshot thread is async — wait briefly for the file.
