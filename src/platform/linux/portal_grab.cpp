@@ -200,6 +200,60 @@ namespace portal {
     return result;
   }
 
+  // XDG ScreenCast cursor modes (bitmask on AvailableCursorModes):
+  // 1 = Hidden, 2 = Embedded, 4 = Metadata.
+  // gamescope portal may report 0 until it is bound to a live compositor; never
+  // hard-require Embedded (2) — that yields InvalidArgument and hangs handshake.
+  static uint32_t portal_available_cursor_modes(GDBusConnection *conn) {
+    GError *gerr = nullptr;
+    auto *result = g_dbus_connection_call_sync(conn,
+      "org.freedesktop.portal.Desktop",
+      "/org/freedesktop/portal/desktop",
+      "org.freedesktop.DBus.Properties",
+      "Get",
+      g_variant_new("(ss)", "org.freedesktop.portal.ScreenCast", "AvailableCursorModes"),
+      G_VARIANT_TYPE("(v)"),
+      G_DBUS_CALL_FLAGS_NONE,
+      3000,
+      nullptr,
+      &gerr);
+    if (!result) {
+      if (gerr) {
+        BOOST_LOG(warning) << "portal: AvailableCursorModes query failed: "sv << gerr->message;
+        g_error_free(gerr);
+      }
+      return 0;
+    }
+    GVariant *inner = nullptr;
+    g_variant_get(result, "(v)", &inner);
+    g_variant_unref(result);
+    uint32_t modes = 0;
+    if (inner) {
+      if (g_variant_is_of_type(inner, G_VARIANT_TYPE_UINT32)) {
+        modes = g_variant_get_uint32(inner);
+      }
+      g_variant_unref(inner);
+    }
+    return modes;
+  }
+
+  // Prefer Embedded, then Metadata, then Hidden. Returns 0 → omit cursor_mode.
+  static uint32_t portal_pick_cursor_mode(uint32_t available) {
+    constexpr uint32_t kHidden = 1;
+    constexpr uint32_t kEmbedded = 2;
+    constexpr uint32_t kMetadata = 4;
+    if (available & kEmbedded) {
+      return kEmbedded;
+    }
+    if (available & kMetadata) {
+      return kMetadata;
+    }
+    if (available & kHidden) {
+      return kHidden;
+    }
+    return 0;
+  }
+
   // Helper: wait for a Response signal on a request path.
   // Uses a dedicated GMainLoop thread to ensure D-Bus signals are delivered.
   static GVariant *wait_for_response(GDBusConnection *conn, const std::string &request_path,
@@ -339,12 +393,23 @@ namespace portal {
     {
       std::string req_path = make_request_path(session->conn, "polaris_req2");
 
+      const uint32_t available_cursor = portal_available_cursor_modes(session->conn);
+      const uint32_t cursor_mode = portal_pick_cursor_mode(available_cursor);
+      BOOST_LOG(info) << "portal: AvailableCursorModes="sv << available_cursor
+                      << " selected_cursor_mode="sv << cursor_mode
+                      << (cursor_mode == 0 ? " (omit — portal reports none)" : "") << ""sv;
+
       GVariantBuilder builder;
       g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
       g_variant_builder_add(&builder, "{sv}", "types",
         g_variant_new_uint32(capture_type));
-      g_variant_builder_add(&builder, "{sv}", "cursor_mode",
-        g_variant_new_uint32(2));
+      // Only request a cursor mode the portal advertises. Hardcoding Embedded (2)
+      // fails with InvalidArgument when AvailableCursorModes is 0 (cold portal /
+      // gamescope not bound yet) and leaves Moonlight stuck in handshake.
+      if (cursor_mode != 0) {
+        g_variant_builder_add(&builder, "{sv}", "cursor_mode",
+          g_variant_new_uint32(cursor_mode));
+      }
       g_variant_builder_add(&builder, "{sv}", "persist_mode",
         g_variant_new_uint32(2));
       g_variant_builder_add(&builder, "{sv}", "handle_token",
@@ -363,8 +428,27 @@ namespace portal {
 
       auto *resp = wait_for_response(session->conn, req_path, 10000);
       if (!resp) {
-        session->failed = true;
-        return session;
+        // Retry once without restore_token / cursor if first SelectSources hung
+        // (stale token or modes still settling after portal restart).
+        BOOST_LOG(warning) << "portal: SelectSources response missing — retry without restore_token"sv;
+        req_path = make_request_path(session->conn, "polaris_req2b");
+        GVariantBuilder b2;
+        g_variant_builder_init(&b2, G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(capture_type));
+        if (cursor_mode != 0) {
+          g_variant_builder_add(&b2, "{sv}", "cursor_mode", g_variant_new_uint32(cursor_mode));
+        }
+        g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("polaris_req2b"));
+        auto *r2 = portal_call_sync(session->conn, "SelectSources",
+          g_variant_new("(oa{sv})", session->session_handle.c_str(), &b2));
+        if (r2) {
+          g_variant_unref(r2);
+        }
+        resp = wait_for_response(session->conn, req_path, 10000);
+        if (!resp) {
+          session->failed = true;
+          return session;
+        }
       }
       g_variant_unref(resp);
     }
